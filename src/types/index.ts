@@ -295,6 +295,18 @@ export interface PetStatus {
   spritesOverridden: boolean;
   hitOutside: boolean;
   hitCenter: boolean;
+  // ペットの行動の設計書のPhase 1: 全部の画面・ほかのアプリのウィンドウ(前面から順)・足場
+  screens: { full: PetRect; work: PetRect }[];
+  windows: { id: number; app: string; rect: PetRect; focused: boolean }[];
+  platforms: { owner: { kind: "floor"; screen: number } | { kind: "window"; id: number }; y: number; x0: number; x1: number }[];
+  windowsMs: number;
+}
+
+export interface PetRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
 }
 
 // 知らせの種類(詩織Ver6.0の段階3)。タイマーの終わり・Claudeの作業の終わり・要確認・拡張機能からの知らせ

@@ -13,6 +13,8 @@
 pub mod brain;
 pub mod os;
 pub mod sprites;
+pub mod surfaces;
+pub mod windows;
 
 use crate::error_codes;
 use crate::notify::{Kind, Notice};
@@ -21,6 +23,7 @@ use brain::{Brain, Event, Input, World};
 use serde::Serialize;
 use serde_json::Value;
 use sprites::{Sprites, FRAME_H, FRAME_W};
+use surfaces::{Platform, ScreenArea, WinInfo};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{
@@ -32,6 +35,8 @@ const PART: &str = "PET";
 pub const PET: &str = "pet";
 pub const PANEL: &str = "pet-panel";
 pub const BUBBLE: &str = "pet-bubble";
+/// 足場の確かめの表示(画面ごとに1つ。`SHIORI_PET_DEBUG=1` で起動したときだけ出す)
+const DEBUG_PREFIX: &str = "pet-debug-";
 /// キャラクターの背丈が、画面の高さに占める割合(仮の絵で見て決める。企画書の未確定事項)
 const HEIGHT_RATIO: f64 = 0.18;
 /// 計算の間隔(1秒に60回)
@@ -43,6 +48,8 @@ const PANEL_SIZE: (f64, f64) = (440.0, 470.0);
 const BUBBLE_SIZE: (f64, f64) = (280.0, 132.0);
 /// 本がペットの押しで閉じたすぐあとの押しでは、開き直さない(もう一度押すと閉じる、のため)
 const REOPEN_GUARD: Duration = Duration::from_millis(400);
+/// ほかのアプリのウィンドウの一覧を読み直す間隔(ペットの行動の設計書の1節)
+const WINDOWS_EVERY: Duration = Duration::from_millis(250);
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -81,6 +88,13 @@ struct Inner {
     fullscreen: bool,
     fullscreen_checked: Option<Instant>,
     world: Option<World>,
+    /// 全部の画面、ほかのアプリのウィンドウ(前面から順)、足場(ペットの行動の設計書の1・2節)
+    screens: Vec<ScreenArea>,
+    windows: Vec<WinInfo>,
+    platforms: Vec<Platform>,
+    windows_checked: Option<Instant>,
+    /// ウィンドウの一覧を読むのにかかったミリ秒(自己確認で見る)
+    windows_ms: f64,
 }
 
 fn ctl() -> &'static Mutex<Inner> {
@@ -105,6 +119,11 @@ fn ctl() -> &'static Mutex<Inner> {
             fullscreen: false,
             fullscreen_checked: None,
             world: None,
+            screens: Vec::new(),
+            windows: Vec::new(),
+            platforms: Vec::new(),
+            windows_checked: None,
+            windows_ms: 0.0,
         })
     })
 }
@@ -287,6 +306,15 @@ fn set_pet_size(w: &WebviewWindow, screen: &Screen) -> tauri::Result<()> {
     }
 }
 
+fn area_of(s: &Screen) -> ScreenArea {
+    let r = |(x, y, w, h): (f64, f64, f64, f64)| surfaces::Rect::new(x, y, w, h);
+    ScreenArea { full: r(s.full), work: r(s.work) }
+}
+
+fn all_screens(app: &AppHandle) -> Vec<Screen> {
+    app.available_monitors().unwrap_or_default().into_iter().map(screen_of).collect()
+}
+
 fn world_of(screen: &Screen, fullscreen: bool) -> World {
     let (wx, wy, ww, wh) = screen.work;
     let (sw, sh) = (FRAME_W as f64 * screen.dot, FRAME_H as f64 * screen.dot);
@@ -339,6 +367,9 @@ pub fn enter(app: &AppHandle) -> Result<(), String> {
         c.ignoring = false;
         c.active = true;
     }
+    if debug_enabled() {
+        open_debug(app);
+    }
     let _ = main.hide();
     let _ = pet.show();
     set_dock(app, false);
@@ -362,6 +393,11 @@ pub fn leave(app: &AppHandle) -> Result<(), String> {
     }
     for label in [PANEL, BUBBLE, PET] {
         if let Some(w) = window(app, label) {
+            let _ = w.hide();
+        }
+    }
+    for (label, w) in app.webview_windows() {
+        if label.starts_with(DEBUG_PREFIX) {
             let _ = w.hide();
         }
     }
@@ -518,6 +554,9 @@ fn tick(app: &AppHandle, dt: f64) {
     let center = (b.x + pw / 2.0, b.y + ph / 2.0);
     drop(c);
     let Some(screen) = screen_at(app, center.0, center.1) else { return };
+    if lock().windows_checked.is_none_or(|t| t.elapsed() >= WINDOWS_EVERY) {
+        refresh_surfaces(app);
+    }
 
     let mut c = lock();
     // 前面のアプリが全画面かは、0.5秒ごとに見る
@@ -599,6 +638,104 @@ fn tick(app: &AppHandle, dt: f64) {
             Event::Pressed => on_pressed(app),
             Event::StateChanged(s) => shiori_log::debug(PART, "状態が変わった", &[("状態", &format!("{s:?}"))]),
         }
+    }
+}
+
+// ---- ほかのアプリのウィンドウと足場(ペットの行動の設計書の1・2節) ----
+
+/// 全部の画面とウィンドウの一覧を読み直し、足場を計算し直す。行動にはまだ使わない(Phase 2から)
+fn refresh_surfaces(app: &AppHandle) {
+    let t = Instant::now();
+    let listed = windows::list();
+    let ms = t.elapsed().as_secs_f64() * 1000.0;
+    if listed.is_none() {
+        static WARNED: OnceLock<()> = OnceLock::new();
+        if WARNED.set(()).is_ok() {
+            shiori_log::warn(error_codes::PET_005.code, "ほかのアプリのウィンドウを読めない", &[]);
+        }
+    }
+    let screens = all_screens(app);
+    let areas: Vec<ScreenArea> = screens.iter().map(area_of).collect();
+    let mut c = lock();
+    let screens_changed = areas != c.screens;
+    if screens_changed {
+        let names: Vec<String> = screens.iter().map(|s| s.monitor.name().cloned().unwrap_or_default()).collect();
+        shiori_log::info(PART, "画面の並びが変わった", &[("画面", &format!("{names:?}")), ("範囲", &format!("{areas:?}"))]);
+    }
+    let pet = (FRAME_W as f64 * c.dot, FRAME_H as f64 * c.dot);
+    let windows = listed.unwrap_or_default();
+    let platforms = surfaces::platforms(&areas, &windows, pet, true);
+    c.screens = areas;
+    c.windows = windows;
+    c.platforms = platforms;
+    c.windows_checked = Some(Instant::now());
+    c.windows_ms = ms;
+    drop(c);
+    // 確かめの表示は、読み込み終わる前に送った分を受け取れないので、変わらなくても毎回送る
+    if debug_enabled() {
+        if screens_changed {
+            open_debug(app);
+        }
+        draw_debug(app, &screens);
+    }
+}
+
+fn debug_enabled() -> bool {
+    std::env::var("SHIORI_PET_DEBUG").is_ok_and(|v| v == "1")
+}
+
+/// 足場の確かめの表示を、画面ごとに開く(クリックは全部通す)。画面の並びが変わったときも呼ぶ
+fn open_debug(app: &AppHandle) {
+    for (i, s) in all_screens(app).iter().enumerate() {
+        let (_, _, w, h) = s.full;
+        let Ok(win) = build(app, &format!("{DEBUG_PREFIX}{i}"), "pet-debug", (w / s.logical, h / s.logical)) else {
+            continue;
+        };
+        // 前の並びで開いた窓を使い回すときのため、大きさと位置を毎回合わせる
+        let _ = win.set_size(LogicalSize::new(w / s.logical, h / s.logical));
+        let _ = win.set_ignore_cursor_events(true);
+        let _ = set_window_position(&win, s.full.0, s.full.1);
+        let _ = win.show();
+    }
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct DebugLine {
+    /// 画面の左上からの、画面の画素(CSSの画素)
+    x: f64,
+    y: f64,
+    w: f64,
+    label: String,
+    floor: bool,
+}
+
+/// 足場を、その足場がある画面の表示へ送る(画面にまたがる足場は、それぞれの画面で切れて見える)
+fn draw_debug(app: &AppHandle, screens: &[Screen]) {
+    let c = lock();
+    let name = |p: &Platform| match p.owner {
+        surfaces::Owner::Floor { screen } => format!("床{screen}"),
+        surfaces::Owner::Window { id } => c.windows.iter().find(|w| w.id == id).map_or(String::new(), |w| w.app.clone()),
+    };
+    let per_screen: Vec<Vec<DebugLine>> = screens
+        .iter()
+        .map(|s| {
+            let (sx, sy, _, _) = s.full;
+            c.platforms
+                .iter()
+                .map(|p| DebugLine {
+                    x: (p.x0 - sx) / s.logical,
+                    y: (p.y - sy) / s.logical,
+                    w: (p.x1 - p.x0) / s.logical,
+                    label: name(p),
+                    floor: matches!(p.owner, surfaces::Owner::Floor { .. }),
+                })
+                .collect()
+        })
+        .collect();
+    drop(c);
+    for (i, lines) in per_screen.into_iter().enumerate() {
+        let _ = app.emit_to(format!("{DEBUG_PREFIX}{i}").as_str(), "pet://debug", lines);
     }
 }
 
@@ -721,6 +858,11 @@ pub struct PetStatus {
     /// 自己確認: 絵の外の点(0,0)と、絵の真ん中の不透明な点で、クリックを受けるか
     hit_outside: bool,
     hit_center: bool,
+    /// 全部の画面・ほかのアプリのウィンドウ(前面から順)・足場と、一覧を読むのにかかったミリ秒
+    screens: Vec<ScreenArea>,
+    windows: Vec<WinInfo>,
+    platforms: Vec<Platform>,
+    windows_ms: f64,
 }
 
 #[tauri::command]
@@ -752,6 +894,10 @@ pub fn pet_status(app: AppHandle) -> PetStatus {
         sprites_overridden: c.sprites.overridden,
         hit_outside: c.sprites.opaque_at("idle", 0, false, 0, 0),
         hit_center: center.is_some_and(|(x, y)| c.sprites.opaque_at("idle", 0, false, x, y)),
+        screens: c.screens.clone(),
+        windows: c.windows.clone(),
+        platforms: c.platforms.clone(),
+        windows_ms: c.windows_ms,
     }
 }
 

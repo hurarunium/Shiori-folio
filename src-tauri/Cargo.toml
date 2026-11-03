@@ -69,5 +69,12 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_SystemInformation",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
+    # ペットが乗るウィンドウの見えている枠と、別の仮想デスクトップの判定(ペットの行動の設計書)
+    "Win32_Graphics_Dwm",
 ] }
+
+# ペットが乗るウィンドウの一覧を読む(ペットの行動の設計書)。Tauriが使う版と同じにして、新しく入るものを増やさない
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+core-graphics = "0.25"
 

@@ -3812,6 +3812,8 @@ version = "6.0.1"
 dependencies = [
  "anyhow",
  "chrono",
+ "core-foundation",
+ "core-graphics",
  "cpal",
  "fs4",
  "hound",
