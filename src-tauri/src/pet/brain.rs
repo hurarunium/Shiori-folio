@@ -6,7 +6,8 @@
 //! いる場所(居場所)は、画面ごとの床か、ほかのアプリのウィンドウの上辺。全部の画面をつなげた1つの世界で動き、
 //! 隣に画面が無い辺だけを壁と天井にする。乗っているウィンドウが動けば一緒に動き、閉じる・隠れると落ちる。
 
-use super::surfaces::{self, Owner, Platform, Presence, ScreenArea};
+use super::behavior::{Action, Behavior, Weights, FAVORITE};
+use super::surfaces::{self, Owner, Platform, Presence, Rect, ScreenArea};
 use serde::Serialize;
 
 /// 重力(ドット/秒²)。倍率を掛けて画素にする
@@ -19,8 +20,6 @@ const DRAG_START: f64 = 4.0;
 const THROW_SPEED: f64 = 120.0;
 /// 床で普段のとき、画面の端からこの割合の中で過ごす
 const EDGE_ZONE: f64 = 0.2;
-/// 普段の行動を選ぶとき、飛び移るを選ぶ割合(Phase 3で点数に置き換える)
-const JUMP_SHARE: f64 = 0.2;
 /// 飛び移れる距離: 横はいる画面の幅の割合まで、上はペットの背丈の倍まで(下は制限なし。設計書の4節)
 const JUMP_REACH_X: f64 = 0.4;
 const JUMP_REACH_UP: f64 = 3.0;
@@ -28,6 +27,13 @@ const JUMP_REACH_UP: f64 = 3.0;
 const JUMP_SAMPLES: usize = 16;
 /// 縁に座るとき、絵を下げる量(ドット)。足を垂らす絵(Phase 5)に合わせて決める。それまでは下げない
 const SIT_DROP: f64 = 0.0;
+/// ぶら下がるとき、絵の上端を縁から上げる量と、手を縁にかける幅(ドット)。ぶら下がる絵(Phase 5)に合わせて決める
+const HANG_TOP: f64 = 20.0;
+const HANG_GRIP: f64 = 30.0;
+/// 登るのにかかる秒数
+const CLIMB_TIME: f64 = 1.0;
+/// 入力中とみなす、最後の入力からの秒数(設計書の5節)
+pub const BUSY_SECONDS: f64 = 10.0;
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -44,6 +50,10 @@ pub enum State {
     Land,
     /// 足場から足場へ跳ぶ(飛び乗る・飛び降りる・飛び移る・画面を移る)
     Jump,
+    /// ウィンドウの上の角にぶら下がる(体はウィンドウの横の外)
+    Hang,
+    /// ぶら下がった所から、上辺へ登る
+    Climb,
 }
 
 /// 普段のときに、していること
@@ -74,9 +84,53 @@ pub struct World {
     pub ride: Option<(u64, Presence)>,
     /// 座らない上辺の幅(ウィンドウの左端から、右端から)。ボタンが付いている所
     pub caption: (f64, f64),
+    /// 行動の設定(重み・活発さ)
+    pub behavior: Params,
+    /// ウィンドウごとの好み(登録の無いウィンドウは普通)
+    pub prefs: Vec<(u64, Pref)>,
+    /// 入力中のウィンドウ(前面で、最後の入力から10秒以内)。静かにする設定がオフならNone
+    pub busy: Option<u64>,
+}
+
+/// 行動を選ぶのに使う設定(`Behavior` から作る)
+#[derive(Clone, Copy, Debug)]
+pub struct Params {
+    pub weights: Weights,
+    pub move_factor: f64,
+    pub time_factor: f64,
+}
+
+impl From<&Behavior> for Params {
+    fn from(b: &Behavior) -> Self {
+        Self { weights: b.weights, move_factor: b.move_factor(), time_factor: b.time_factor() }
+    }
+}
+
+impl Default for Params {
+    fn default() -> Self {
+        Self::from(&Behavior::default())
+    }
+}
+
+/// ウィンドウ(のアプリ)の好み。行き先の倍率・いる時間の倍率・その上でしやすい行動
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pref {
+    pub go: f64,
+    pub stay: f64,
+    pub favorite: Option<Action>,
+}
+
+impl Default for Pref {
+    fn default() -> Self {
+        Self { go: 1.0, stay: 1.0, favorite: None }
+    }
 }
 
 impl World {
+    fn pref(&self, id: u64) -> Pref {
+        self.prefs.iter().find(|(i, _)| *i == id).map(|(_, p)| *p).unwrap_or_default()
+    }
+
     fn floor(&self, screen: usize) -> Option<&Platform> {
         self.platforms.iter().find(|p| p.owner == Owner::Floor { screen })
     }
@@ -113,6 +167,33 @@ impl World {
 pub struct Stand {
     pub owner: Owner,
     pub dx: f64,
+}
+
+/// ぶら下がる側(ウィンドウの左の角か、右の角か)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    Right,
+}
+
+/// 普段の行動の候補
+#[derive(Clone, Copy, Debug)]
+enum Choice {
+    Stand,
+    Sit,
+    Read,
+    Walk,
+    Jump(Jump),
+    Hang(Side),
+    Nap,
+}
+
+/// 乗っている縁(この線より下で、このxの間の点はクリックを通す)
+#[derive(Serialize, Clone, Copy, Debug, PartialEq)]
+pub struct Edge {
+    pub y: f64,
+    pub x0: f64,
+    pub x1: f64,
 }
 
 /// 跳ぶ計画(放物線)。時間を距離で決め、着く点を通るように初めの速さを決める
@@ -205,9 +286,15 @@ pub struct Brain {
     pub stand: Option<Stand>,
     /// いまの居場所の持ち主の左端(ウィンドウなら毎回読み直す。床は0)
     anchor_now: f64,
-    /// ウィンドウの上にいるときの、その上辺の高さ(それより下の点はクリックを通す)
-    pub edge_y: Option<f64>,
+    /// ウィンドウの上にいるときの、その上辺(それより下の、そのウィンドウの幅の点はクリックを通す)
+    pub edge: Option<Edge>,
     jump: Option<Jump>,
+    /// ぶら下がっている・登っている側
+    hang: Option<Side>,
+    /// 角まで歩いたら、ぶら下がる
+    pending_hang: Option<Side>,
+    /// うたた寝(入力があっても、決めた時間まで眠る)
+    nap: bool,
 }
 
 impl Brain {
@@ -239,8 +326,11 @@ impl Brain {
             rng: seed | 1,
             stand,
             anchor_now: 0.0,
-            edge_y: None,
+            edge: None,
             jump: None,
+            hang: None,
+            pending_hang: None,
+            nap: false,
         }
     }
 
@@ -316,35 +406,195 @@ impl Brain {
         }
     }
 
-    /// 普段のときの次の過ごし方: 飛び移る・本を読む・待つ(ウィンドウの上では座ることも)・少し歩く
+    /// 候補から、点数に比例した確率で1つ選ぶ(毎回同じにはならず、点数の分だけ偏る。設計書の4節)
+    fn pick(&mut self, scores: &[f64]) -> Option<usize> {
+        let total: f64 = scores.iter().filter(|s| **s > 0.0).sum();
+        if total <= 0.0 {
+            return None;
+        }
+        let mut r = self.rand() * total;
+        for (i, s) in scores.iter().enumerate() {
+            if *s <= 0.0 {
+                continue;
+            }
+            if r < *s {
+                return Some(i);
+            }
+            r -= s;
+        }
+        scores.iter().rposition(|s| *s > 0.0)
+    }
+
+    /// 普段のときの次の行動を、点数で選ぶ。点数 = 行動の重み × アプリの好み × 活発さ × 邪魔しない条件
     fn choose_activity(&mut self, w: &World, events: &mut Vec<Event>) {
-        if self.rand() < JUMP_SHARE {
+        let Some((lo, hi)) = self.range(w) else { return };
+        let here = self.riding();
+        let pref = here.map_or(Pref::default(), |id| w.pref(id));
+        // 入力中のウィンドウの上では静かにする(立つ・座る・読むだけ)
+        let busy = here.is_some() && here == w.busy;
+        let (wt, mv) = (w.behavior.weights, w.behavior.move_factor);
+        let fav = |a: Action| if pref.favorite == Some(a) { FAVORITE } else { 1.0 };
+
+        let mut cands: Vec<(Choice, f64)> = vec![
+            (Choice::Stand, wt.stand * fav(Action::Stand)),
+            (Choice::Read, wt.read * fav(Action::Read)),
+            (Choice::Nap, wt.sleep * fav(Action::Sleep)),
+        ];
+        if here.is_some() && self.can_sit(w) {
+            cands.push((Choice::Sit, wt.sit * fav(Action::Sit)));
+        }
+        if !busy {
+            cands.push((Choice::Walk, wt.walk * mv * fav(Action::Walk)));
+            // 飛び移る(同じ画面の中)と、画面を移る。行き先ごとの点数(好み × 距離)のうち、
+            // いちばん高いものを行動の点数に掛け、行き先はその点数に比例して選ぶ
             let plans = self.jump_candidates(w);
-            if !plans.is_empty() {
-                let i = ((self.rand() * plans.len() as f64) as usize).min(plans.len() - 1);
-                self.start_jump(plans[i], events);
-                return;
+            let mine = w.screen_at(self.x + w.size.0 / 2.0, self.y + w.size.1 / 2.0);
+            for (action, other_screen) in [(Action::Jump, false), (Action::Screen, true)] {
+                let group: Vec<(Jump, f64)> = plans
+                    .iter()
+                    .filter(|j| (w.screen_at(j.to.0 + w.size.0 / 2.0, j.to.1 + w.size.1 - 1.0) != mine) == other_screen)
+                    .map(|j| (*j, self.jump_score(j, w)))
+                    .filter(|(_, s)| *s > 0.0)
+                    .collect();
+                let best = group.iter().map(|(_, s)| *s).fold(0.0, f64::max);
+                if best <= 0.0 {
+                    continue;
+                }
+                let scores: Vec<f64> = group.iter().map(|(_, s)| *s).collect();
+                if let Some(i) = self.pick(&scores) {
+                    cands.push((Choice::Jump(group[i].0), wt.of(action) * mv * fav(action) * best));
+                }
+            }
+            if let Some(side) = self.hang_side(w) {
+                cands.push((Choice::Hang(side), wt.hang * mv * fav(Action::Hang)));
             }
         }
-        let Some((lo, hi)) = self.range(w) else { return };
-        let r = self.rand();
-        if r < 0.4 {
-            self.activity = Activity::Read;
-            self.activity_left = 10.0 + self.rand() * 15.0;
-        } else if r < 0.75 {
-            self.activity = if self.on_window() && self.can_sit(w) && self.rand() < 0.5 { Activity::Sit } else { Activity::Idle };
-            self.activity_left = 4.0 + self.rand() * 6.0;
-        } else if self.on_window() {
-            // ウィンドウの上では、上辺の見えている部分のどこへでも
-            let x = lo + self.rand() * (hi - lo);
-            self.walk_to(x);
-        } else {
-            // 床では、端の近くにとどまる(端から EDGE_ZONE の中)
-            let zone = (hi - lo) * EDGE_ZONE;
-            let (zlo, zhi) = if self.x < (lo + hi) / 2.0 { (lo, lo + zone) } else { (hi - zone, hi) };
-            let step = (30.0 + self.rand() * 90.0) * w.scale * if self.rand() < 0.5 { -1.0 } else { 1.0 };
-            self.walk_to((self.x + step).clamp(zlo, zhi));
+
+        let scores: Vec<f64> = cands.iter().map(|(_, s)| *s).collect();
+        // 全部0なら、その場で待つ
+        let choice = self.pick(&scores).map_or(Choice::Stand, |i| cands[i].0);
+        // 次の行動を選ぶまでの時間: 活発さで縮み、好きなアプリの上では伸びる
+        let time = w.behavior.time_factor * pref.stay;
+        match choice {
+            Choice::Read => {
+                self.activity = Activity::Read;
+                self.activity_left = (10.0 + self.rand() * 15.0) * time;
+            }
+            Choice::Stand | Choice::Sit => {
+                self.activity = if matches!(choice, Choice::Sit) { Activity::Sit } else { Activity::Idle };
+                self.activity_left = (4.0 + self.rand() * 6.0) * time;
+            }
+            Choice::Nap => {
+                self.target_x = None;
+                self.nap = true;
+                let secs = (20.0 + self.rand() * 40.0) * time;
+                self.set(State::Sleep, Some(secs), events);
+            }
+            Choice::Jump(plan) => self.start_jump(plan, events),
+            Choice::Hang(side) => {
+                // 角まで歩いてから、ぶら下がる
+                self.pending_hang = Some(side);
+                self.walk_to(if side == Side::Right { hi } else { lo });
+            }
+            Choice::Walk if self.on_window() => {
+                // ウィンドウの上では、上辺の見えている部分のどこへでも
+                let x = lo + self.rand() * (hi - lo);
+                self.walk_to(x);
+            }
+            Choice::Walk => {
+                // 床では、端の近くにとどまる(端から EDGE_ZONE の中)
+                let zone = (hi - lo) * EDGE_ZONE;
+                let (zlo, zhi) = if self.x < (lo + hi) / 2.0 { (lo, lo + zone) } else { (hi - zone, hi) };
+                let step = (30.0 + self.rand() * 90.0) * w.scale * if self.rand() < 0.5 { -1.0 } else { 1.0 };
+                self.walk_to((self.x + step).clamp(zlo, zhi));
+            }
         }
+    }
+
+    /// 行き先の点数: 行き先のアプリの好み × 距離(近いほど1、届く限りいっぱいで0.5)
+    fn jump_score(&self, j: &Jump, w: &World) -> f64 {
+        let go = match j.target {
+            Owner::Window { id } => w.pref(id).go,
+            Owner::Floor { .. } => 1.0,
+        };
+        let reach = w.screens.get(w.current).map_or(1000.0, |s| s.work.w * JUMP_REACH_X);
+        let d = ((j.to.0 - j.from.0).powi(2) + (j.to.1 - j.from.1).powi(2)).sqrt();
+        go * (1.0 - 0.5 * (d / reach).min(1.0))
+    }
+
+    /// ぶら下がれる角(いまいる見えている部分が、ウィンドウの角まで続き、角の外が画面の中)。近いほう
+    fn hang_side(&self, w: &World) -> Option<Side> {
+        let Some((_, Presence::Visible(r))) = w.ride else { return None };
+        let (lo, hi) = self.range(w)?;
+        let (pw, ph) = w.size;
+        let mid = r.y + ph / 2.0;
+        let right = hi + pw >= r.right() - 1.0 && w.inside(r.right() + pw / 2.0, mid);
+        let left = lo <= r.x + 1.0 && w.inside(r.x - pw / 2.0, mid);
+        match (left, right) {
+            (true, true) => Some(if self.x - lo < hi - self.x { Side::Left } else { Side::Right }),
+            (true, false) => Some(Side::Left),
+            (false, true) => Some(Side::Right),
+            (false, false) => None,
+        }
+    }
+
+    /// ぶら下がる・登る間の絵の左上(登る間は、ぶら下がる位置から上辺に立つ位置へ動く)
+    fn hang_pos(&self, side: Side, r: &Rect, w: &World) -> (f64, f64) {
+        let (pw, ph) = w.size;
+        let s = w.scale;
+        let hang = match side {
+            Side::Right => (r.right() - HANG_GRIP * s, r.y - HANG_TOP * s),
+            Side::Left => (r.x - pw + HANG_GRIP * s, r.y - HANG_TOP * s),
+        };
+        if self.state != State::Climb {
+            return hang;
+        }
+        let stand = match side {
+            Side::Right => (r.right() - pw, r.y - ph),
+            Side::Left => (r.x, r.y - ph),
+        };
+        let k = (self.state_t / CLIMB_TIME).clamp(0.0, 1.0);
+        (hang.0 + (stand.0 - hang.0) * k, hang.1 + (stand.1 - hang.1) * k)
+    }
+
+    fn start_hang(&mut self, side: Side, w: &World, events: &mut Vec<Event>) {
+        self.hang = Some(side);
+        // すぐ角の外に移す(次のコマまで上辺の上に残ると、1コマだけ位置が飛んで見えるため)
+        if let Some((_, Presence::Visible(r))) = w.ride {
+            let (x, y) = self.hang_pos(side, &r, w);
+            self.x = x;
+            self.y = y;
+        }
+        // ウィンドウのほうを向く
+        self.facing = if side == Side::Right { -1.0 } else { 1.0 };
+        let secs = 3.0 + self.rand() * 5.0;
+        self.set(State::Hang, Some(secs), events);
+    }
+
+    /// ぶら下がり終わった: 登るか、手を離して落ちる(登るの重みが0なら必ず落ちる)
+    fn after_hang(&mut self, w: &World, events: &mut Vec<Event>) {
+        let climb = w.behavior.weights.climb;
+        if self.rand() < climb / (climb + 1.0) {
+            self.set(State::Climb, Some(CLIMB_TIME), events);
+        } else {
+            self.start_fly(events);
+        }
+    }
+
+    /// 登り終わった: 角の上辺に立つ
+    fn after_climb(&mut self, w: &World, events: &mut Vec<Event>) {
+        let Some((_, Presence::Visible(r))) = w.ride else {
+            self.start_fly(events);
+            return;
+        };
+        let side = self.hang.take();
+        let x = if side == Some(Side::Left) { r.x } else { r.right() - w.size.0 };
+        self.x = x;
+        self.y = r.y - w.size.1;
+        if let Some(st) = self.stand.as_mut() {
+            st.dx = x - r.x;
+        }
+        self.to_normal(w, false, events);
     }
 
     /// 上辺のボタンが付いている所では座らない(足を垂らすと、ボタンにかぶるため)
@@ -364,6 +614,10 @@ impl Brain {
             if p.owner == st.owner || p.x1 - p.x0 < pw {
                 continue;
             }
+            // 入力中のウィンドウへは飛び移らない
+            if matches!(p.owner, Owner::Window { id } if Some(id) == w.busy) {
+                continue;
+            }
             // いまのxに近い所へ、少しずらして着く
             let near = self.x.clamp(p.x0, p.x1 - pw);
             let tx = (near + (self.rand() - 0.5) * pw).clamp(p.x0, p.x1 - pw);
@@ -381,8 +635,9 @@ impl Brain {
 
     fn start_jump(&mut self, plan: Jump, events: &mut Vec<Event>) {
         self.stand = None;
-        self.edge_y = None;
+        self.edge = None;
         self.target_x = None;
+        self.pending_hang = None;
         self.facing = if plan.to.0 < plan.from.0 { -1.0 } else { 1.0 };
         self.jump = Some(plan);
         self.set(State::Jump, None, events);
@@ -391,8 +646,10 @@ impl Brain {
     /// 居場所から外れて落ちる
     fn start_fly(&mut self, events: &mut Vec<Event>) {
         self.stand = None;
-        self.edge_y = None;
+        self.edge = None;
         self.jump = None;
+        self.hang = None;
+        self.pending_hang = None;
         self.target_x = None;
         self.set(State::Fly, None, events);
     }
@@ -405,9 +662,12 @@ impl Brain {
         self.vx = 0.0;
         self.vy = 0.0;
         self.jump = None;
+        self.hang = None;
+        self.pending_hang = None;
         self.anchor_now = p.anchor;
         self.stand = Some(Stand { owner: p.owner, dx: self.x - p.anchor });
-        self.edge_y = self.on_window().then_some(p.y);
+        // 縁の左右は、次に乗っているウィンドウを読んだときに決まる
+        self.edge = None;
         self.set(State::Land, Some(0.5), events);
     }
 
@@ -431,7 +691,7 @@ impl Brain {
             Owner::Floor { screen } => match w.floor(screen).copied() {
                 Some(p) => {
                     self.anchor_now = 0.0;
-                    self.edge_y = None;
+                    self.edge = None;
                     self.y = p.y - ph;
                     self.move_x(self.x.clamp(p.x0, (p.x1 - pw).max(p.x0)));
                     true
@@ -444,10 +704,17 @@ impl Brain {
             Owner::Window { id } => match w.ride {
                 Some((rid, Presence::Visible(r))) if rid == id => {
                     self.anchor_now = r.x;
+                    self.edge = Some(Edge { y: r.y, x0: r.x, x1: r.right() });
+                    if let Some(side) = self.hang {
+                        // ぶら下がる・登る間は、角の外に体を出す。見えている部分かは見ない(体が縁の外にあるため)
+                        let (x, y) = self.hang_pos(side, &r, w);
+                        self.x = x;
+                        self.y = y;
+                        return true;
+                    }
                     self.x = r.x + st.dx;
                     let drop = if self.state == State::Normal && self.activity == Activity::Sit { SIT_DROP * w.scale } else { 0.0 };
                     self.y = r.y - ph + drop;
-                    self.edge_y = Some(r.y);
                     // まだ足場か(前に別のウィンドウが来て隠れていない、頭が画面からはみ出ていない)
                     let cx = st.dx + pw / 2.0;
                     let ok = w.platforms.iter().any(|p| p.owner == st.owner && cx >= p.x0 - p.anchor && cx <= p.x1 - p.anchor);
@@ -510,7 +777,7 @@ impl Brain {
     /// 知らせ。Claudeの作業の終わりは喜ぶ。眠っていても起きて知らせる
     pub fn notice(&mut self, happy: bool) -> Vec<Event> {
         let mut events = Vec::new();
-        if matches!(self.state, State::Dangle | State::Fly | State::Jump) {
+        if matches!(self.state, State::Dangle | State::Fly | State::Jump | State::Hang | State::Climb) {
             return events;
         }
         if happy {
@@ -543,8 +810,11 @@ impl Brain {
                     self.vx = 0.0;
                     self.vy = 0.0;
                     self.stand = None;
-                    self.edge_y = None;
+                    self.edge = None;
                     self.jump = None;
+                    self.hang = None;
+                    self.pending_hang = None;
+                    self.nap = false;
                     self.set(State::Dangle, None, &mut events);
                 }
             }
@@ -637,6 +907,8 @@ impl Brain {
                     let sleepy = input.idle_seconds.is_some_and(|i| i >= input.sleep_after);
                     if sleepy {
                         self.target_x = None;
+                        self.pending_hang = None;
+                        self.nap = false;
                         self.set(State::Sleep, None, &mut events);
                     } else if self.activity == Activity::Walk {
                         let (lo, hi) = self.range(w).unwrap_or((self.x, self.x));
@@ -645,7 +917,10 @@ impl Brain {
                         if (target - self.x).abs() <= step {
                             self.move_x(target);
                             self.target_x = None;
-                            self.choose_activity(w, &mut events);
+                            match self.pending_hang.take() {
+                                Some(side) => self.start_hang(side, w, &mut events),
+                                None => self.choose_activity(w, &mut events),
+                            }
                         } else {
                             self.facing = (target - self.x).signum();
                             self.move_x(self.x + self.facing * step);
@@ -659,7 +934,8 @@ impl Brain {
                 }
             }
             State::Sleep => {
-                if self.follow(w, &mut events) && input.idle_seconds.is_some_and(|i| i < 1.0) {
+                // うたた寝は、入力があっても決めた時間まで眠る
+                if self.follow(w, &mut events) && !self.nap && input.idle_seconds.is_some_and(|i| i < 1.0) {
                     self.set(State::Wake, Some(1.25), &mut events);
                 }
             }
@@ -673,6 +949,13 @@ impl Brain {
             if self.state_t >= until {
                 match self.state {
                     State::Appear | State::Land => self.to_normal(w, true, &mut events),
+                    State::Sleep => {
+                        // うたた寝から起きる
+                        self.nap = false;
+                        self.set(State::Wake, Some(1.25), &mut events);
+                    }
+                    State::Hang => self.after_hang(w, &mut events),
+                    State::Climb => self.after_climb(w, &mut events),
                     _ => self.to_normal(w, false, &mut events),
                 }
             }
@@ -709,6 +992,8 @@ impl Brain {
                 Some(j) if j.to.1 < j.from.1 => "jump_on",
                 _ => "jump_off",
             },
+            State::Hang => "hang",
+            State::Climb => "climb",
         }
     }
 
@@ -737,7 +1022,18 @@ mod tests {
     /// 画面だけの世界(足場は床)
     fn world_of(screens: Vec<ScreenArea>) -> World {
         let platforms = surfaces::platforms(&screens, &[], PET, true);
-        World { scale: 1.0, size: PET, screens, current: 0, platforms, ride: None, caption: (0.0, 140.0) }
+        World {
+            scale: 1.0,
+            size: PET,
+            screens,
+            current: 0,
+            platforms,
+            ride: None,
+            caption: (0.0, 140.0),
+            behavior: Params::default(),
+            prefs: Vec::new(),
+            busy: None,
+        }
     }
 
     /// 今までのテストの世界: 床の上で、絵の左上のxが0〜1792、yが840
@@ -868,7 +1164,7 @@ mod tests {
         drop_onto(&mut b, &w, 600.0);
         assert_eq!(b.riding(), Some(5));
         assert!((b.y - (500.0 - 192.0)).abs() < 1e-9);
-        assert_eq!(b.edge_y, Some(500.0));
+        assert_eq!(b.edge, Some(Edge { y: 500.0, x0: 400.0, x1: 1200.0 }));
 
         // ウィンドウを右下へ動かすと、一緒に動く(足場の一覧はまだ古いまま)
         let mut moved = w.clone();
@@ -1030,5 +1326,199 @@ mod tests {
         // 右端から140はボタン(Windows)
         b.move_x(1200.0 - 128.0 - 50.0);
         assert!(!b.can_sit(&w));
+    }
+
+    /// 重みだけを決めた設定(活発さは普通)
+    fn only(f: impl Fn(&mut Weights)) -> Params {
+        let mut wt = Weights { stand: 0.0, sit: 0.0, read: 0.0, walk: 0.0, jump: 0.0, screen: 0.0, hang: 0.0, climb: 0.0, sleep: 0.0 };
+        f(&mut wt);
+        Params { weights: wt, ..Params::default() }
+    }
+
+    /// 普段の行動を何度も選ばせて、選んだものを数える(選ぶたびに、選ぶ前の状態に戻す)
+    fn choose_many(b: &mut Brain, w: &World, n: usize) -> Vec<(State, Activity, Option<Owner>)> {
+        let (x, y, stand, state) = (b.x, b.y, b.stand, b.state);
+        let mut out = Vec::new();
+        for _ in 0..n {
+            let mut ev = Vec::new();
+            b.choose_activity(w, &mut ev);
+            let target = b.jump.map(|j| j.target);
+            out.push((b.state, if b.target_x.is_some() { Activity::Walk } else { b.activity }, target));
+            b.x = x;
+            b.y = y;
+            b.stand = stand;
+            b.state = state;
+            b.jump = None;
+            b.target_x = None;
+            b.pending_hang = None;
+            b.nap = false;
+            b.activity = Activity::Idle;
+        }
+        out
+    }
+
+    #[test]
+    fn 重みを0にした行動は選ばない() {
+        let mut w = world();
+        w.behavior = only(|wt| wt.read = 5.0);
+        let mut b = Brain::new(&w, 3);
+        run_in(&mut b, &w, 1.1, &awake());
+        // 現れた直後の、端へ歩いている途中を止める
+        b.target_x = None;
+        let got = choose_many(&mut b, &w, 300);
+        assert!(got.iter().all(|(s, a, _)| *s == State::Normal && *a == Activity::Read), "{got:?}");
+        // 全部0なら、その場で待つ
+        w.behavior = only(|_| {});
+        let got = choose_many(&mut b, &w, 50);
+        assert!(got.iter().all(|(s, a, _)| *s == State::Normal && *a == Activity::Idle));
+    }
+
+    #[test]
+    fn 大好きなアプリへ行きやすく_長くいる() {
+        // 床の左右に、同じ距離・同じ高さのウィンドウ(5は普通、6は大好き)
+        let wins = [win(5, 300.0, 700.0, 400.0, 300.0), win(6, 1220.0, 700.0, 400.0, 300.0)];
+        let mut w = with_windows(world(), &wins, None);
+        w.behavior = only(|wt| wt.jump = 5.0);
+        w.prefs = vec![(6, Pref { go: 4.0, stay: 2.0, favorite: None })];
+        let mut b = Brain::new(&w, 5);
+        b.x = (960.0 - 64.0) as f64;
+        b.state = State::Normal;
+        let got = choose_many(&mut b, &w, 400);
+        let to = |id| got.iter().filter(|(_, _, t)| *t == Some(Owner::Window { id })).count();
+        assert!(to(6) > to(5) * 2, "大好き{} 普通{}", to(6), to(5));
+
+        // 大好きなアプリの上では、次の行動を選ぶまでが長い
+        let mut w = with_windows(world(), &wins, Some(6));
+        w.behavior = only(|wt| wt.stand = 5.0);
+        w.prefs = vec![(6, Pref { go: 4.0, stay: 2.0, favorite: None })];
+        let mut b = Brain::new(&w, 5);
+        place_on(&mut b, &w, 6, wins[1].rect, 1300.0);
+        let mut ev = Vec::new();
+        let mut love = 0.0;
+        for _ in 0..200 {
+            b.choose_activity(&w, &mut ev);
+            love += b.activity_left;
+        }
+        w.prefs.clear();
+        let mut normal = 0.0;
+        for _ in 0..200 {
+            b.choose_activity(&w, &mut ev);
+            normal += b.activity_left;
+        }
+        assert!(love > normal * 1.6, "大好き{love} 普通{normal}");
+    }
+
+    #[test]
+    fn 好きな行動はそのアプリの上で選ばれやすい() {
+        let wins = [win(5, 400.0, 500.0, 800.0, 300.0)];
+        let mut w = with_windows(world(), &wins, Some(5));
+        w.behavior = only(|wt| {
+            wt.stand = 5.0;
+            wt.read = 5.0;
+        });
+        w.prefs = vec![(5, Pref { go: 1.0, stay: 1.0, favorite: Some(Action::Read) })];
+        let mut b = Brain::new(&w, 9);
+        place_on(&mut b, &w, 5, wins[0].rect, 600.0);
+        let got = choose_many(&mut b, &w, 400);
+        let read = got.iter().filter(|(_, a, _)| *a == Activity::Read).count();
+        // 読むは3倍なので、約3/4
+        assert!(read > 250, "読む{read}/400");
+    }
+
+    #[test]
+    fn 入力中のウィンドウの上では歩かず跳ばず_そこへ飛び移りもしない() {
+        let wins = [win(5, 400.0, 500.0, 800.0, 300.0), win(6, 1300.0, 600.0, 500.0, 300.0)];
+        let mut w = with_windows(world(), &wins, Some(5));
+        w.behavior = only(|wt| {
+            wt.walk = 5.0;
+            wt.jump = 5.0;
+            wt.hang = 5.0;
+            wt.stand = 1.0;
+        });
+        w.busy = Some(5);
+        let mut b = Brain::new(&w, 9);
+        place_on(&mut b, &w, 5, wins[0].rect, 600.0);
+        let got = choose_many(&mut b, &w, 200);
+        assert!(got.iter().all(|(s, a, _)| *s == State::Normal && *a == Activity::Idle), "{got:?}");
+
+        // 床から、入力中のウィンドウ(5)へは飛び移らず、もう1つ(6)へは飛び移る
+        let mut w = with_windows(world(), &wins, None);
+        w.busy = Some(5);
+        let mut b = Brain::new(&w, 9);
+        b.x = 900.0;
+        let targets: Vec<Owner> = b.jump_candidates(&w).iter().map(|j| j.target).collect();
+        assert!(!targets.contains(&Owner::Window { id: 5 }));
+        assert!(targets.contains(&Owner::Window { id: 6 }));
+    }
+
+    #[test]
+    fn ぶら下がるのはウィンドウの横の外で_登ると上辺に立つ() {
+        let wins = [win(5, 400.0, 500.0, 800.0, 300.0)];
+        let mut w = with_windows(world(), &wins, Some(5));
+        w.behavior = only(|wt| {
+            wt.hang = 5.0;
+            wt.climb = 10.0;
+        });
+        let mut b = Brain::new(&w, 9);
+        place_on(&mut b, &w, 5, wins[0].rect, 1000.0);
+        let mut ev = Vec::new();
+        b.choose_activity(&w, &mut ev);
+        // 近いほう(右)の角まで歩いて、ぶら下がる
+        let mut seen_hang = false;
+        for _ in 0..2000 {
+            b.step(0.016, &w, &awake());
+            if b.state == State::Hang {
+                seen_hang = true;
+                // 体の真ん中は、ウィンドウの右端より外
+                assert!(b.x + 64.0 > 1200.0, "x={}", b.x);
+                assert!(b.y > 500.0 - 192.0);
+            }
+            if seen_hang && b.state == State::Normal {
+                break;
+            }
+        }
+        assert!(seen_hang);
+        assert_eq!(b.state, State::Normal);
+        assert_eq!(b.riding(), Some(5));
+        assert!((b.x - (1200.0 - 128.0)).abs() < 1e-9);
+        assert!((b.y - (500.0 - 192.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn 登るの重みが0なら_ぶら下がったあと手を離して落ちる() {
+        let wins = [win(5, 400.0, 500.0, 800.0, 300.0)];
+        let mut w = with_windows(world(), &wins, Some(5));
+        w.behavior = only(|wt| wt.hang = 5.0);
+        let mut b = Brain::new(&w, 9);
+        place_on(&mut b, &w, 5, wins[0].rect, 1000.0);
+        let mut ev = Vec::new();
+        b.choose_activity(&w, &mut ev);
+        let mut fell = false;
+        for _ in 0..2000 {
+            b.step(0.016, &w, &awake());
+            if b.state == State::Fly {
+                fell = true;
+                break;
+            }
+        }
+        assert!(fell);
+    }
+
+    #[test]
+    fn うたた寝は入力があっても時間まで眠り_起きる() {
+        let mut w = world();
+        w.behavior = only(|wt| wt.sleep = 5.0);
+        let mut b = Brain::new(&w, 9);
+        run_in(&mut b, &w, 1.1, &awake());
+        let mut ev = Vec::new();
+        b.choose_activity(&w, &mut ev);
+        assert_eq!(b.state, State::Sleep);
+        // 入力があっても眠ったまま
+        let typing = Input { idle_seconds: Some(0.1), sleep_after: 300.0, ..Default::default() };
+        run_in(&mut b, &w, 5.0, &typing);
+        assert_eq!(b.state, State::Sleep);
+        // 決めた時間(最長60秒)で起きる(重みが眠るだけなので、起きたあとまた眠ることがある)
+        let ev = run_in(&mut b, &w, 120.0, &typing);
+        assert!(ev.contains(&Event::StateChanged(State::Wake)));
     }
 }

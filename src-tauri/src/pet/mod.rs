@@ -10,6 +10,7 @@
 //! Macでは、ペットの形のあいだだけ、詩織をDockとCmd+Tabから外す(本体のウィンドウを隠している間だけなので、
 //! ペットのウィンドウだけを外す仕組みは要らない)。
 
+pub mod behavior;
 pub mod brain;
 pub mod os;
 pub mod sprites;
@@ -19,6 +20,7 @@ pub mod windows;
 use crate::error_codes;
 use crate::notify::{Kind, Notice};
 use crate::shiori_log;
+use behavior::{Behavior, Like};
 use brain::{Brain, Event, Input, World};
 use serde::Serialize;
 use serde_json::Value;
@@ -96,6 +98,8 @@ struct Inner {
     windows_checked: Option<Instant>,
     /// ウィンドウの一覧を読むのにかかったミリ秒(自己確認で見る)
     windows_ms: f64,
+    /// 行動の設定(`data/pet/behavior.json`。ペットの形にするたびに読む)
+    behavior: Behavior,
 }
 
 fn ctl() -> &'static Mutex<Inner> {
@@ -125,6 +129,7 @@ fn ctl() -> &'static Mutex<Inner> {
             platforms: Vec::new(),
             windows_checked: None,
             windows_ms: 0.0,
+            behavior: Behavior::default(),
         })
     })
 }
@@ -326,8 +331,29 @@ fn caption_of(screen: &Screen) -> (f64, f64) {
     }
 }
 
+/// 行動の設定のファイル
+fn behavior_path() -> std::path::PathBuf {
+    crate::project_root().join("data").join("pet").join("behavior.json")
+}
+
+/// 行動の設定を読む。読めなければ「普通」のひな形で動き、PET-006をログに書く
+fn load_behavior() -> Behavior {
+    let path = behavior_path();
+    let (b, err) = Behavior::load(&path);
+    if let Some(e) = err {
+        shiori_log::warn(error_codes::PET_006.code, "ペットの行動の設定を読めない", &[("場所", &path.display()), ("理由", &e)]);
+    }
+    b
+}
+
 /// ペットのいる世界。`current` はペットの真ん中がある画面
-fn world_of(c: &Inner, screen: &Screen, current: usize, ride: Option<(u64, surfaces::Presence)>) -> World {
+fn world_of(
+    c: &Inner,
+    screen: &Screen,
+    current: usize,
+    ride: Option<(u64, surfaces::Presence)>,
+    idle: Option<f64>,
+) -> World {
     let mut platforms = c.platforms.clone();
     // 全画面のアプリが前面にあるときは、タスクバーの分も床にする(作業領域が変わらず浮くため)
     if c.fullscreen {
@@ -343,6 +369,19 @@ fn world_of(c: &Inner, screen: &Screen, current: usize, ride: Option<(u64, surfa
         platforms,
         ride,
         caption: caption_of(screen),
+        behavior: brain::Params::from(&c.behavior),
+        prefs: c
+            .windows
+            .iter()
+            .filter_map(|w| {
+                let p = c.behavior.pref_of(&w.app)?;
+                Some((w.id, brain::Pref { go: p.like.go(), stay: p.like.stay(), favorite: p.favorite }))
+            })
+            .collect(),
+        // 入力中のウィンドウ: 前面で、最後の入力から10秒以内(キーボードとマウスを分けて取る方法がWindowsに無いため。ふらる、11/3)
+        busy: (c.behavior.quiet_on_focused && idle.is_some_and(|i| i < brain::BUSY_SECONDS))
+            .then(|| c.windows.iter().find(|w| w.focused).map(|w| w.id))
+            .flatten(),
     }
 }
 
@@ -380,12 +419,13 @@ pub fn enter(app: &AppHandle) -> Result<(), String> {
         c.scale = scale;
         c.dot = screen.dot;
         c.fullscreen = false;
+        c.behavior = load_behavior();
     }
     // 現れる床を決めるため、先に画面とウィンドウを読む
     refresh_surfaces(app);
     let world = {
         let c = lock();
-        world_of(&c, &screen, index_of(&c, &screen), None)
+        world_of(&c, &screen, index_of(&c, &screen), None, os::idle_seconds())
     };
     // 自己確認の起動では眠らせない。最後の入力から眠るまでの時間を過ぎてから走らせると、
     // ペットが出た直後に眠り、「現れてから普段」の確かめが走らせる環境で変わってしまうため(段階6)
@@ -613,12 +653,12 @@ fn tick(app: &AppHandle, dt: f64) {
     c.scale = scale;
     c.dot = dot;
     let current = index_of(&c, &screen);
-    let world = world_of(&c, &screen, current, ride);
+    let world = world_of(&c, &screen, current, ride, idle);
     let sleep_after = c.sleep_after;
     let input = Input { cursor, button_down, idle_seconds: idle, sleep_after };
     let Some(b) = c.brain.as_mut() else { return };
     let events = b.step(dt, &world, &input);
-    let edge_y = b.edge_y;
+    let edge = b.edge;
     let pos = (b.x.round() as i32, b.y.round() as i32);
     let facing_left = b.facing < 0.0;
     let anim_name = b.anim();
@@ -635,7 +675,8 @@ fn tick(app: &AppHandle, dt: f64) {
     });
     // ウィンドウの上にいるとき、乗っている縁より下の点はクリックを通す(足を垂らしても、上辺の
     // クリックやドラッグを妨げない。設定で変えられない決まり。設計書の5節)
-    let below_edge = cursor.zip(edge_y).is_some_and(|((_, cy), e)| cy >= e);
+    // ぶら下がっている体はウィンドウの横の外にあるので、通すのはそのウィンドウの幅の中だけ
+    let below_edge = cursor.zip(edge).is_some_and(|((cx, cy), e)| cy >= e.y && cx >= e.x0 && cx < e.x1);
     let over_sprite = over_sprite && !below_edge;
     let ignore = !(over_sprite || grabbing);
     let ignore_changed = ignore != c.ignoring;
@@ -711,9 +752,19 @@ fn refresh_surfaces(app: &AppHandle) {
     }
     let pet = (FRAME_W as f64 * c.dot, FRAME_H as f64 * c.dot);
     let windows = listed.unwrap_or_default();
-    // 自己確認の起動では、ウィンドウに乗らない(床に立つかを確かめるため)
-    let ride_windows = !crate::self_test::is_enabled();
-    let platforms = surfaces::platforms(&areas, &windows, pet, ride_windows);
+    // 自己確認の起動と、ウィンドウに乗る行動をオフにしたときは、ウィンドウに乗らない
+    let ride_windows = !crate::self_test::is_enabled() && c.behavior.enabled;
+    let mut platforms = surfaces::platforms(&areas, &windows, pet, ride_windows);
+    // 「避ける」アプリのウィンドウと、全画面のアプリが前面にある画面のウィンドウには乗らない(設計書の5節)
+    let avoid: Vec<u64> =
+        windows.iter().filter(|w| c.behavior.pref_of(&w.app).is_some_and(|p| p.like == Like::Avoid)).map(|w| w.id).collect();
+    let full = if c.behavior.no_ride_fullscreen { surfaces::fullscreen_screen(&areas, &windows) } else { None };
+    platforms.retain(|p| match p.owner {
+        surfaces::Owner::Floor { .. } => true,
+        surfaces::Owner::Window { id } => {
+            !avoid.contains(&id) && (full.is_none() || surfaces::screen_index_at(&areas, (p.x0 + p.x1) / 2.0, p.y) != full)
+        }
+    });
     c.screens = areas;
     c.windows = windows;
     c.platforms = platforms;

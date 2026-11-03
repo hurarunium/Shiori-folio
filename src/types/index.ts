@@ -264,8 +264,10 @@ export type PetState =
   | "dangle"
   | "fly"
   | "land"
-  // 足場から足場へ跳ぶ(ペットの行動の設計書)
-  | "jump";
+  // 足場から足場へ跳ぶ、ウィンドウの角にぶら下がる、登る(ペットの行動の設計書)
+  | "jump"
+  | "hang"
+  | "climb";
 
 export interface PetFrame {
   state: PetState;

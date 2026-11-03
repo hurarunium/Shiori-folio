@@ -62,7 +62,8 @@ pub enum Presence {
     Visible(Rect),
     /// 残っているが見えない(別の仮想デスクトップ。Macでは最小化もここに入る。区別する方法が無いため)
     Hidden,
-    /// 最小化した(Windowsだけ)
+    /// 最小化した(Windowsだけ。Macは見えないと区別できないので作らない)
+    #[cfg_attr(not(windows), allow(dead_code))]
     Minimized,
     /// 閉じた
     Gone,
