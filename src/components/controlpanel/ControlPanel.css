@@ -582,3 +582,53 @@
   color: var(--paper);
   user-select: text;
 }
+
+/* ペットの行動の設定(ペットの行動の設計書の6節) */
+.control-panel__field-row .control-panel__actions {
+  margin-top: 0;
+  align-items: center;
+}
+
+.control-panel__pet-note {
+  font-size: var(--fs-sm);
+  color: var(--paper-dim);
+  margin: 4px 0 10px;
+}
+
+.control-panel__pet-app {
+  padding: 10px 0;
+  border-top: 0.5px solid var(--glass-border);
+}
+
+.control-panel__pet-names,
+.control-panel__pet-app-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.control-panel__pet-app-row {
+  margin-top: 8px;
+}
+
+.control-panel__pet-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-base);
+  color: var(--paper);
+  background: var(--glass);
+  border: 0.5px solid var(--glass-border);
+  border-radius: 999px;
+  padding: 3px 6px 3px 12px;
+}
+
+.control-panel__pet-chip button {
+  border: none;
+  background: none;
+  color: var(--paper-dim);
+  cursor: pointer;
+  font-size: var(--fs-base);
+  padding: 0 4px;
+}

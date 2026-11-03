@@ -13,6 +13,9 @@ import type {
   EjectPreview,
   ExtensionInfo,
   Notice,
+  PetBehavior,
+  PetBehaviorDto,
+  PetSeenApp,
   PetStatus,
   SelfTestMode,
   SidebarLayout,
@@ -136,6 +139,10 @@ export const api = {
   petStatus: () => invoke<PetStatus>("pet_status"),
   petSelftestPanel: (tool?: string) => invoke<void>("pet_selftest_panel", { tool: tool ?? null }),
   petSelftestClosePanel: () => invoke<void>("pet_selftest_close_panel"),
+  // ペットの行動の設定(ペットの行動の設計書の6節)。保存するとペットの形のままでもすぐ効く
+  petBehaviorGet: () => invoke<PetBehaviorDto>("pet_behavior_get"),
+  petBehaviorSet: (behavior: PetBehavior) => invoke<PetBehavior>("pet_behavior_set", { behavior }),
+  petSeenApps: () => invoke<PetSeenApp[]>("pet_seen_apps"),
   // forceがfalseなら、前回の取り込みから間もないときは省く。
   refreshClaudeStats: (force: boolean) => invoke<unknown>("refresh_claude_stats", { force }),
   // hostがnullなら全端末の合算。

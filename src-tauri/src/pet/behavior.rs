@@ -210,9 +210,50 @@ impl Behavior {
     }
 }
 
+/// 詩織が見かけたアプリ(設定画面で、好みを登録する一覧に並べる。企画書のP-11)。
+/// SSDをWindowsとMacで共有するので、どちらのOSで見たかも持つ
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SeenApp {
+    pub name: String,
+    /// "mac" か "win"
+    pub os: String,
+    /// 初めて見た日時(ISO 8601)
+    pub first_seen: String,
+}
+
+/// 見かけたアプリの一覧を読む(無い・読めないときは空)
+pub fn load_seen(path: &Path) -> Vec<SeenApp> {
+    std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+/// 一覧に無い名前を足す。足したらtrue(同じ名前でもOSが違えば別に並べる)
+pub fn merge_seen(list: &mut Vec<SeenApp>, names: &[String], os: &str, now: &str) -> bool {
+    let mut changed = false;
+    for n in names {
+        if n.is_empty() || list.iter().any(|s| s.os == os && s.name == *n) {
+            continue;
+        }
+        list.push(SeenApp { name: n.clone(), os: os.to_string(), first_seen: now.to_string() });
+        changed = true;
+    }
+    changed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn 見かけたアプリは新しい名前だけ足し_OSが違えば別に並べる() {
+        let mut list = Vec::new();
+        assert!(merge_seen(&mut list, &["Claude".into(), "Finder".into()], "mac", "t1"));
+        assert!(!merge_seen(&mut list, &["Claude".into()], "mac", "t2"));
+        assert!(merge_seen(&mut list, &["Claude".into(), String::new()], "win", "t3"));
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0].first_seen, "t1");
+        assert_eq!(list[2].os, "win");
+    }
 
     #[test]
     fn 書いていない項目は普通のひな形() {

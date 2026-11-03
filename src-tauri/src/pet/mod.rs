@@ -20,7 +20,7 @@ pub mod windows;
 use crate::error_codes;
 use crate::notify::{Kind, Notice};
 use crate::shiori_log;
-use behavior::{Behavior, Like};
+use behavior::{Behavior, Like, Preset, SeenApp};
 use brain::{Brain, Event, Input, World};
 use serde::Serialize;
 use serde_json::Value;
@@ -98,8 +98,10 @@ struct Inner {
     windows_checked: Option<Instant>,
     /// ウィンドウの一覧を読むのにかかったミリ秒(自己確認で見る)
     windows_ms: f64,
-    /// 行動の設定(`data/pet/behavior.json`。ペットの形にするたびに読む)
+    /// 行動の設定(`data/pet/behavior.json`。ペットの形にするたびに読み、設定画面で保存するとすぐ入れ替える)
     behavior: Behavior,
+    /// この起動で見かけたアプリの名前(新しい名前を見たときだけ、見かけたアプリの一覧に書く)
+    seen: std::collections::HashSet<String>,
 }
 
 fn ctl() -> &'static Mutex<Inner> {
@@ -130,6 +132,7 @@ fn ctl() -> &'static Mutex<Inner> {
             windows_checked: None,
             windows_ms: 0.0,
             behavior: Behavior::default(),
+            seen: std::collections::HashSet::new(),
         })
     })
 }
@@ -334,6 +337,39 @@ fn caption_of(screen: &Screen) -> (f64, f64) {
 /// 行動の設定のファイル
 fn behavior_path() -> std::path::PathBuf {
     crate::project_root().join("data").join("pet").join("behavior.json")
+}
+
+/// 見かけたアプリの一覧のファイル
+fn seen_path() -> std::path::PathBuf {
+    crate::project_root().join("data").join("pet").join("seen-apps.json")
+}
+
+fn os_tag() -> &'static str {
+    if cfg!(windows) {
+        "win"
+    } else {
+        "mac"
+    }
+}
+
+/// 新しく見かけたアプリを、見かけたアプリの一覧に足す。SSDへの書き込みは1秒60回の計算を止めないよう、別のスレッドで行う
+fn note_seen(names: Vec<String>) {
+    std::thread::spawn(move || {
+        let path = seen_path();
+        let mut list = behavior::load_seen(&path);
+        let now = chrono::Local::now().to_rfc3339();
+        if !behavior::merge_seen(&mut list, &names, os_tag(), &now) {
+            return;
+        }
+        let result = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|_| std::fs::write(&path, serde_json::to_string_pretty(&list).unwrap_or_default()));
+        match result {
+            Ok(()) => shiori_log::info(PART, "見かけたアプリを一覧に足した", &[("アプリ", &format!("{names:?}"))]),
+            Err(e) => shiori_log::warn(error_codes::PET_007.code, "見かけたアプリの一覧を書けない", &[("理由", &e)]),
+        }
+    });
 }
 
 /// 行動の設定を読む。読めなければ「普通」のひな形で動き、PET-006をログに書く
@@ -765,12 +801,17 @@ fn refresh_surfaces(app: &AppHandle) {
             !avoid.contains(&id) && (full.is_none() || surfaces::screen_index_at(&areas, (p.x0 + p.x1) / 2.0, p.y) != full)
         }
     });
+    let new_apps: Vec<String> = windows.iter().map(|w| w.app.clone()).filter(|a| !a.is_empty() && !c.seen.contains(a)).collect();
+    c.seen.extend(new_apps.iter().cloned());
     c.screens = areas;
     c.windows = windows;
     c.platforms = platforms;
     c.windows_checked = Some(Instant::now());
     c.windows_ms = ms;
     drop(c);
+    if !new_apps.is_empty() {
+        note_seen(new_apps);
+    }
     // 確かめの表示は、読み込み終わる前に送った分を受け取れないので、変わらなくても毎回送る
     if debug_enabled() {
         if screens_changed {
@@ -850,6 +891,57 @@ fn frame_of(sprites: &Sprites, anim: &str, state_t: f64) -> u32 {
 }
 
 // ---- 窓口 ----
+
+// ---- 行動の設定(ペットの行動の設計書の6節) ----
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BehaviorDto {
+    behavior: Behavior,
+    /// ひな形(設定画面の「静か・普通・遊ぶ」)
+    presets: std::collections::BTreeMap<&'static str, Behavior>,
+}
+
+/// 行動の設定と、ひな形を返す
+#[tauri::command]
+pub async fn pet_behavior_get() -> Result<BehaviorDto, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let presets =
+            [("quiet", Preset::Quiet), ("normal", Preset::Normal), ("play", Preset::Play)].map(|(k, p)| (k, p.behavior()));
+        BehaviorDto { behavior: load_behavior(), presets: presets.into_iter().collect() }
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// 行動の設定を保存する。ペットの形のままでもすぐ効く(範囲の外の値は収めて、収めた値を返す)
+#[tauri::command]
+pub async fn pet_behavior_set(behavior: Behavior) -> Result<Behavior, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let b = behavior.normalized();
+        let path = behavior_path();
+        let text = serde_json::to_string_pretty(&b).map_err(|e| e.to_string())?;
+        path.parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|_| std::fs::write(&path, text))
+            .map_err(|e| format!("ペットの行動の設定を書けない: {e}"))?;
+        let mut c = lock();
+        c.behavior = b.clone();
+        // 乗れるウィンドウ(避けるアプリ・オンオフ)を、次の計算で読み直す
+        c.windows_checked = None;
+        drop(c);
+        shiori_log::info(PART, "ペットの行動の設定を保存した", &[("活発さ", &b.activity), ("アプリ", &b.apps.len())]);
+        Ok(b)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 見かけたアプリの一覧(両方のOSの分)
+#[tauri::command]
+pub async fn pet_seen_apps() -> Result<Vec<SeenApp>, String> {
+    tauri::async_runtime::spawn_blocking(|| behavior::load_seen(&seen_path())).await.map_err(|e| e.to_string())
+}
 
 #[tauri::command]
 pub async fn pet_enter(app: AppHandle) -> Result<(), String> {

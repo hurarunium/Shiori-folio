@@ -5747,6 +5747,9 @@ pub fn run() {
             pet::pet_status,
             pet::pet_selftest_panel,
             pet::pet_selftest_close_panel,
+            pet::pet_behavior_get,
+            pet::pet_behavior_set,
+            pet::pet_seen_apps,
             sidebar_layout::get_sidebar_layout,
             sidebar_layout::set_sidebar_layout,
             sidebar_layout::list_icon_overrides

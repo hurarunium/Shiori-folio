@@ -309,6 +309,37 @@ export interface PetStatus {
   windowsMs: number;
 }
 
+// ペットの行動の設定(ペットの行動の設計書の6節。data/pet/behavior.json)
+export type PetAction = "stand" | "sit" | "read" | "walk" | "jump" | "screen" | "hang" | "climb" | "sleep";
+export type PetLike = "avoid" | "normal" | "like" | "love";
+
+export interface PetAppPref {
+  // 同じアプリでもOSごとに名前が違うので、名前を複数持てる(大文字・小文字は区別しない)
+  names: string[];
+  like: PetLike;
+  favorite: PetAction | null;
+}
+
+export interface PetBehavior {
+  enabled: boolean;
+  activity: number;
+  weights: Record<PetAction, number>;
+  quietOnFocused: boolean;
+  noRideFullscreen: boolean;
+  apps: PetAppPref[];
+}
+
+export interface PetBehaviorDto {
+  behavior: PetBehavior;
+  presets: Record<"quiet" | "normal" | "play", PetBehavior>;
+}
+
+export interface PetSeenApp {
+  name: string;
+  os: "mac" | "win";
+  firstSeen: string;
+}
+
 export interface PetRect {
   x: number;
   y: number;

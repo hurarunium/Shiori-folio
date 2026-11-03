@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 import { api } from "../../api/tauri";
 import { NumberRow, TextRow } from "./shared";
+import { PetBehaviorPanel } from "./PetBehaviorPanel";
 
 // ペットの形の設定(詩織Ver6.0の段階4)。形の切り替えのホットキー、眠るまでの時間、本と小道具の枠の大きさ。
 // 保存するとconfig.jsonのpetに書く。ホットキーの変更は、録音のホットキーと同じく次の起動から。
 // 本と小道具の枠の大きさは、次に本を開いたときから変わる。
+// その下に、ペットの行動の設定(PetBehaviorPanel。ペットの行動の設計書の6節)を置く。保存は別。
 interface PetForm {
   hotkey: string;
   sleep: number;
@@ -81,6 +83,7 @@ export function PetSettingsPage() {
           </button>
         </div>
       </div>
+      <PetBehaviorPanel />
     </>
   );
 }
