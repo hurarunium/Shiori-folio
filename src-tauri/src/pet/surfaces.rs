@@ -55,6 +55,19 @@ pub struct WinInfo {
     pub focused: bool,
 }
 
+/// 前に一覧にあったウィンドウが、いまどうなっているか(`windows::presence` が返す)
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Presence {
+    /// 画面に出ている(位置と大きさ)
+    Visible(Rect),
+    /// 残っているが見えない(別の仮想デスクトップ。Macでは最小化もここに入る。区別する方法が無いため)
+    Hidden,
+    /// 最小化した(Windowsだけ)
+    Minimized,
+    /// 閉じた
+    Gone,
+}
+
 /// 足場の持ち主
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", tag = "kind")]
@@ -71,6 +84,9 @@ pub struct Platform {
     pub y: f64,
     pub x0: f64,
     pub x1: f64,
+    /// 計算したときの持ち主の左端(ウィンドウの左。床は0)。ウィンドウが動いたあとも、
+    /// 足場の見えている部分をウィンドウからの距離で見られるように持つ
+    pub anchor: f64,
 }
 
 /// 幅がペットのこの倍より狭いウィンドウは足場にしない
@@ -82,7 +98,13 @@ pub fn platforms(screens: &[ScreenArea], windows: &[WinInfo], pet: (f64, f64), r
     let (pw, ph) = pet;
     let mut out = Vec::new();
     for (i, s) in screens.iter().enumerate() {
-        out.push(Platform { owner: Owner::Floor { screen: i }, y: s.work.bottom(), x0: s.work.x, x1: s.work.right() });
+        out.push(Platform {
+            owner: Owner::Floor { screen: i },
+            y: s.work.bottom(),
+            x0: s.work.x,
+            x1: s.work.right(),
+            anchor: 0.0,
+        });
     }
     if !ride_windows {
         return out;
@@ -104,7 +126,7 @@ pub fn platforms(screens: &[ScreenArea], windows: &[WinInfo], pet: (f64, f64), r
         segs = intersect(&segs, &covered(screens, y - ph));
         for (x0, x1) in segs {
             if x1 - x0 >= pw {
-                out.push(Platform { owner: Owner::Window { id: w.id }, y, x0, x1 });
+                out.push(Platform { owner: Owner::Window { id: w.id }, y, x0, x1, anchor: w.rect.x });
             }
         }
     }
@@ -195,7 +217,7 @@ mod tests {
         let screens = [screen(0.0, 0.0, 1920.0, 1080.0), screen(1920.0, 0.0, 1920.0, 1080.0)];
         let ps = platforms(&screens, &[], PET, true);
         assert_eq!(ps.len(), 2);
-        assert_eq!(ps[0], Platform { owner: Owner::Floor { screen: 0 }, y: 1040.0, x0: 0.0, x1: 1920.0 });
+        assert_eq!(ps[0], Platform { owner: Owner::Floor { screen: 0 }, y: 1040.0, x0: 0.0, x1: 1920.0, anchor: 0.0 });
         assert_eq!(ps[1].x0, 1920.0);
     }
 

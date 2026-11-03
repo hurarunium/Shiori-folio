@@ -149,10 +149,19 @@ impl Sprites {
 
     /// 動きの絵。無ければ `idle`。
     pub fn anim(&self, name: &str) -> (&str, &Anim) {
-        match self.anims.get_key_value(name) {
-            Some((k, a)) => (k.as_str(), a),
-            None => ("idle", &self.anims["idle"]),
+        // ペットの行動の設計書の新しい動きは、絵ができるまで近い動きの絵を使う(7節)
+        let near = match name {
+            "jump_on" => "fly",
+            "jump_off" => "fall",
+            "hang" | "climb" => "dangle",
+            _ => "idle",
+        };
+        for n in [name, near] {
+            if let Some((k, a)) = self.anims.get_key_value(n) {
+                return (k.as_str(), a);
+            }
         }
+        ("idle", &self.anims["idle"])
     }
 
     /// そのコマの、その点(ドット、左上から)が不透明か。左向きのときは左右を反転して見る。

@@ -263,11 +263,14 @@ export type PetState =
   | "react"
   | "dangle"
   | "fly"
-  | "land";
+  | "land"
+  // 足場から足場へ跳ぶ(ペットの行動の設計書)
+  | "jump";
 
 export interface PetFrame {
   state: PetState;
-  activity: "walk" | "idle" | "read";
+  // sit: ウィンドウの縁に座る(ペットの行動の設計書)
+  activity: "walk" | "idle" | "read" | "sit";
   anim: string;
   file: string;
   frames: number;
@@ -295,6 +298,8 @@ export interface PetStatus {
   spritesOverridden: boolean;
   hitOutside: boolean;
   hitCenter: boolean;
+  // いまの居場所(床かウィンドウか)
+  stand: { owner: { kind: "floor"; screen: number } | { kind: "window"; id: number }; dx: number } | null;
   // ペットの行動の設計書のPhase 1: 全部の画面・ほかのアプリのウィンドウ(前面から順)・足場
   screens: { full: PetRect; work: PetRect }[];
   windows: { id: number; app: string; rect: PetRect; focused: boolean }[];

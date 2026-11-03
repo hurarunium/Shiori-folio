@@ -37,7 +37,8 @@ pub const PANEL: &str = "pet-panel";
 pub const BUBBLE: &str = "pet-bubble";
 /// 足場の確かめの表示(画面ごとに1つ。`SHIORI_PET_DEBUG=1` で起動したときだけ出す)
 const DEBUG_PREFIX: &str = "pet-debug-";
-/// キャラクターの背丈が、画面の高さに占める割合(仮の絵で見て決める。企画書の未確定事項)
+/// キャラクターの背丈が、画面の短いほうの辺に占める割合(縦置きの画面でも同じ大きさにするため、
+/// 高さではなく短いほうの辺で決める。ペットの行動の設計書の3.5節。ふらる、11/3)
 const HEIGHT_RATIO: f64 = 0.18;
 /// 計算の間隔(1秒に60回)
 const TICK: Duration = Duration::from_millis(16);
@@ -256,7 +257,8 @@ fn screen_of(monitor: tauri::Monitor) -> Screen {
     let full = (p.x as f64 * k, p.y as f64 * k, z.width as f64 * k, z.height as f64 * k);
     let work =
         (wa.position.x as f64 * k, wa.position.y as f64 * k, wa.size.width as f64 * k, wa.size.height as f64 * k);
-    let dot_scale = ((z.height as f64 * HEIGHT_RATIO / FRAME_H as f64).round() as u32).max(1);
+    let short = z.width.min(z.height) as f64;
+    let dot_scale = ((short * HEIGHT_RATIO / FRAME_H as f64).round() as u32).max(1);
     let logical = monitor.scale_factor() * k;
     Screen { monitor, full, work, dot_scale, dot: dot_scale as f64 * k, logical }
 }
@@ -315,12 +317,39 @@ fn all_screens(app: &AppHandle) -> Vec<Screen> {
     app.available_monitors().unwrap_or_default().into_iter().map(screen_of).collect()
 }
 
-fn world_of(screen: &Screen, fullscreen: bool) -> World {
-    let (wx, wy, ww, wh) = screen.work;
-    let (sw, sh) = (FRAME_W as f64 * screen.dot, FRAME_H as f64 * screen.dot);
+/// 上辺のボタンが付いている所の幅(座らない所。左端から、右端から)。Macは左の3つの丸、Windowsは右の3つのボタン
+fn caption_of(screen: &Screen) -> (f64, f64) {
+    if cfg!(target_os = "macos") {
+        (76.0 * screen.logical, 0.0)
+    } else {
+        (0.0, 140.0 * screen.logical)
+    }
+}
+
+/// ペットのいる世界。`current` はペットの真ん中がある画面
+fn world_of(c: &Inner, screen: &Screen, current: usize, ride: Option<(u64, surfaces::Presence)>) -> World {
+    let mut platforms = c.platforms.clone();
     // 全画面のアプリが前面にあるときは、タスクバーの分も床にする(作業領域が変わらず浮くため)
-    let bottom = if fullscreen { screen.full.1 + screen.full.3 } else { wy + wh };
-    World { left: wx, right: wx + ww - sw, floor: bottom - sh, top: wy, scale: screen.dot }
+    if c.fullscreen {
+        if let Some(p) = platforms.iter_mut().find(|p| p.owner == surfaces::Owner::Floor { screen: current }) {
+            p.y = screen.full.1 + screen.full.3;
+        }
+    }
+    World {
+        scale: c.dot,
+        size: (FRAME_W as f64 * c.dot, FRAME_H as f64 * c.dot),
+        screens: c.screens.clone(),
+        current,
+        platforms,
+        ride,
+        caption: caption_of(screen),
+    }
+}
+
+/// 画面の一覧の中で、その画面が何番目か
+fn index_of(c: &Inner, screen: &Screen) -> usize {
+    let a = area_of(screen);
+    c.screens.iter().position(|s| *s == a).unwrap_or(0)
 }
 
 fn set_dock(app: &AppHandle, visible: bool) {
@@ -346,7 +375,18 @@ pub fn enter(app: &AppHandle) -> Result<(), String> {
     let center = window_rect(&main).map(|(x, y, w, h)| (x + w / 2.0, y + h / 2.0)).unwrap_or((0.0, 0.0));
     let screen = screen_at(app, center.0, center.1).ok_or("画面が見つからない")?;
     let scale = screen.dot_scale;
-    let world = world_of(&screen, false);
+    {
+        let mut c = lock();
+        c.scale = scale;
+        c.dot = screen.dot;
+        c.fullscreen = false;
+    }
+    // 現れる床を決めるため、先に画面とウィンドウを読む
+    refresh_surfaces(app);
+    let world = {
+        let c = lock();
+        world_of(&c, &screen, index_of(&c, &screen), None)
+    };
     // 自己確認の起動では眠らせない。最後の入力から眠るまでの時間を過ぎてから走らせると、
     // ペットが出た直後に眠り、「現れてから普段」の確かめが走らせる環境で変わってしまうため(段階6)
     let sleep_after =
@@ -358,8 +398,6 @@ pub fn enter(app: &AppHandle) -> Result<(), String> {
     {
         let mut c = lock();
         c.brain = Some(brain);
-        c.scale = scale;
-        c.dot = screen.dot;
         c.world = Some(world);
         c.sleep_after = sleep_after;
         c.last_pos = (i32::MIN, i32::MIN);
@@ -419,13 +457,13 @@ pub fn leave(app: &AppHandle) -> Result<(), String> {
 fn place_beside(app: &AppHandle, label: &str, size: (f64, f64), above: bool) -> bool {
     let Some(w) = window(app, label) else { return true };
     let c = lock();
-    let (Some(b), Some(world)) = (c.brain.as_ref(), c.world) else { return true };
+    let Some(b) = c.brain.as_ref() else { return true };
     let (pw, ph) = (FRAME_W as f64 * c.dot, FRAME_H as f64 * c.dot);
     let Some(screen) = screen_at(app, b.x + pw / 2.0, b.y + ph / 2.0) else { return true };
     let (w_px, h_px) = (size.0 * screen.logical, size.1 * screen.logical);
-    let (wx, wy, ww, _) = screen.work;
+    let (wx, wy, ww, wh) = screen.work;
     let (min_x, max_x) = (wx, wx + ww - w_px);
-    let (min_y, max_y) = (wy, world.floor + ph - h_px);
+    let (min_y, max_y) = (wy, wy + wh - h_px);
     let right = b.x + pw <= max_x;
     let (x, y) = if above {
         // 吹き出しは頭の上
@@ -552,11 +590,14 @@ fn tick(app: &AppHandle, dt: f64) {
     let Some(b) = c.brain.as_ref() else { return };
     let (pw, ph) = (FRAME_W as f64 * c.dot, FRAME_H as f64 * c.dot);
     let center = (b.x + pw / 2.0, b.y + ph / 2.0);
+    let (riding, airborne) = (b.riding(), b.airborne());
     drop(c);
     let Some(screen) = screen_at(app, center.0, center.1) else { return };
     if lock().windows_checked.is_none_or(|t| t.elapsed() >= WINDOWS_EVERY) {
         refresh_surfaces(app);
     }
+    // 乗っているウィンドウは毎回読む(運ばれるときに遅れないため)
+    let ride = riding.map(|id| (id, windows::presence(id)));
 
     let mut c = lock();
     // 前面のアプリが全画面かは、0.5秒ごとに見る
@@ -565,18 +606,19 @@ fn tick(app: &AppHandle, dt: f64) {
         c.fullscreen = os::foreground_covers(p.x, p.y, s.width, s.height);
         c.fullscreen_checked = Some(Instant::now());
     }
-    // 画面をまたいだら、その画面の倍率に直す
-    let scale = screen.dot_scale;
-    let dot = screen.dot;
+    // 画面をまたいだら、その画面の倍率に直す。跳んでいる・飛んでいる間は元の大きさのまま、着いてから直す
+    // (重力と速さをドットで決めているので、空中で大きさが変わると線が折れるため。設計書の3節)
+    let (scale, dot) = if airborne { (c.scale, c.dot) } else { (screen.dot_scale, screen.dot) };
     let resized = scale != c.scale || dot != c.dot;
     c.scale = scale;
     c.dot = dot;
-    let world = world_of(&screen, c.fullscreen);
-    c.world = Some(world);
+    let current = index_of(&c, &screen);
+    let world = world_of(&c, &screen, current, ride);
     let sleep_after = c.sleep_after;
     let input = Input { cursor, button_down, idle_seconds: idle, sleep_after };
     let Some(b) = c.brain.as_mut() else { return };
     let events = b.step(dt, &world, &input);
+    let edge_y = b.edge_y;
     let pos = (b.x.round() as i32, b.y.round() as i32);
     let facing_left = b.facing < 0.0;
     let anim_name = b.anim();
@@ -591,6 +633,10 @@ fn tick(app: &AppHandle, dt: f64) {
         let frame = frame_of(&c.sprites, anim_name, state_t);
         c.sprites.opaque_at(anim_name, frame, facing_left, dx, dy)
     });
+    // ウィンドウの上にいるとき、乗っている縁より下の点はクリックを通す(足を垂らしても、上辺の
+    // クリックやドラッグを妨げない。設定で変えられない決まり。設計書の5節)
+    let below_edge = cursor.zip(edge_y).is_some_and(|((_, cy), e)| cy >= e);
+    let over_sprite = over_sprite && !below_edge;
     let ignore = !(over_sprite || grabbing);
     let ignore_changed = ignore != c.ignoring;
     c.ignoring = ignore;
@@ -613,6 +659,7 @@ fn tick(app: &AppHandle, dt: f64) {
     let moved = pos != c.last_pos;
     c.last_pos = pos;
     let (panel_visible, bubble_visible, panel_size) = (c.panel_visible, c.bubble_visible, c.panel_size);
+    c.world = Some(world);
     drop(c);
 
     if resized {
@@ -664,7 +711,9 @@ fn refresh_surfaces(app: &AppHandle) {
     }
     let pet = (FRAME_W as f64 * c.dot, FRAME_H as f64 * c.dot);
     let windows = listed.unwrap_or_default();
-    let platforms = surfaces::platforms(&areas, &windows, pet, true);
+    // 自己確認の起動では、ウィンドウに乗らない(床に立つかを確かめるため)
+    let ride_windows = !crate::self_test::is_enabled();
+    let platforms = surfaces::platforms(&areas, &windows, pet, ride_windows);
     c.screens = areas;
     c.windows = windows;
     c.platforms = platforms;
@@ -847,6 +896,8 @@ pub struct PetStatus {
     size: Option<(u32, u32)>,
     floor: Option<f64>,
     on_floor: bool,
+    /// いまの居場所(床かウィンドウか)
+    stand: Option<brain::Stand>,
     main_visible: bool,
     pet_visible: bool,
     panel_visible: bool,
@@ -872,7 +923,10 @@ pub fn pet_status(app: AppHandle) -> PetStatus {
     let position =
         window(&app, PET).and_then(|w| window_rect(&w)).map(|(x, y, _, _)| (x.round() as i32, y.round() as i32));
     let c = lock();
-    let floor = c.world.map(|w| w.floor);
+    // いる画面の床に立ったときの、絵の左上のy
+    let floor = c.world.as_ref().and_then(|w| {
+        w.platforms.iter().find(|p| p.owner == surfaces::Owner::Floor { screen: w.current }).map(|p| p.y - w.size.1)
+    });
     let on_floor = matches!((position, floor), (Some((_, y)), Some(f)) if (y as f64 - f).abs() <= 1.5);
     let center = c.sprites.center_opaque();
     PetStatus {
@@ -884,6 +938,7 @@ pub fn pet_status(app: AppHandle) -> PetStatus {
         size,
         floor,
         on_floor,
+        stand: c.brain.as_ref().and_then(|b| b.stand),
         main_visible: visible("main"),
         pet_visible: visible(PET),
         panel_visible: visible(PANEL),

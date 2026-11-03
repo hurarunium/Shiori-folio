@@ -4,20 +4,8 @@
 //! Macでは、タイトルを読まなければ画面収録の許可は要らない。座標はペットと同じ単位
 //! (Windowsは物理の画素、Macは主画面の左上が原点の論理の点)。OSの違いはこのファイルの中に閉じ込める。
 
+pub use super::surfaces::Presence;
 use super::surfaces::{Rect, WinInfo};
-
-/// 前に一覧にあったウィンドウが、いまどうなっているか
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Presence {
-    /// 画面に出ている(位置と大きさ)
-    Visible(Rect),
-    /// 残っているが見えない(別の仮想デスクトップ。Macでは最小化もここに入る。区別する方法が無いため)
-    Hidden,
-    /// 最小化した(Windowsだけ)
-    Minimized,
-    /// 閉じた
-    Gone,
-}
 
 // ---- Mac ----
 
