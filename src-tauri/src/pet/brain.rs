@@ -25,6 +25,8 @@ const JUMP_REACH_X: f64 = 0.4;
 const JUMP_REACH_UP: f64 = 3.0;
 /// 跳ぶ線が画面の中を通るかを確かめる点の数
 const JUMP_SAMPLES: usize = 16;
+/// 跳ぶのにかける、いちばん短い秒数(これがいちばん低い弧になる)
+const JUMP_TIME_MIN: f64 = 0.45;
 /// 縁に座るとき、絵を下げる量(ドット)。足を垂らす絵(Phase 5)に合わせて決める。それまでは下げない
 const SIT_DROP: f64 = 0.0;
 /// ぶら下がるとき、絵の上端を縁から上げる量と、手を縁にかける幅(ドット)。ぶら下がる絵(Phase 5)に合わせて決める
@@ -34,6 +36,8 @@ const HANG_GRIP: f64 = 30.0;
 const CLIMB_TIME: f64 = 1.0;
 /// 入力中とみなす、最後の入力からの秒数(設計書の5節)
 pub const BUSY_SECONDS: f64 = 10.0;
+/// 指示された行き先に着いたあと、跳ばない秒数(すぐ離れないため。設計書の9節)
+const GOAL_HOLD: f64 = 60.0;
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -213,7 +217,12 @@ struct Jump {
 impl Jump {
     fn new(from: (f64, f64), to: (f64, f64), scale: f64, target: Owner, anchor: f64) -> Self {
         let dist = ((to.0 - from.0).powi(2) + (to.1 - from.1).powi(2)).sqrt() / scale;
-        let total = (0.45 + dist / 700.0).clamp(0.45, 1.1);
+        let total = (JUMP_TIME_MIN + dist / 700.0).clamp(JUMP_TIME_MIN, 1.1);
+        Self::timed(from, to, scale, target, anchor, total)
+    }
+
+    /// 時間を決めて跳ぶ(短いほど弧が低い)
+    fn timed(from: (f64, f64), to: (f64, f64), scale: f64, target: Owner, anchor: f64, total: f64) -> Self {
         let g = GRAVITY * scale;
         let vx = (to.0 - from.0) / total;
         let vy0 = (to.1 - from.1 - 0.5 * g * total * total) / total;
@@ -245,6 +254,13 @@ impl Jump {
     }
 }
 
+/// 指示された行き先(`dx` は、持ち主の左端からの、着いたときの絵の左上のx)
+#[derive(Clone, Copy, Debug)]
+struct Goal {
+    owner: Owner,
+    dx: f64,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Input {
     pub cursor: Option<(f64, f64)>,
@@ -259,6 +275,8 @@ pub struct Input {
 pub enum Event {
     Pressed,
     StateChanged(State),
+    /// 指示された行き先への動きが終わった(着いたらtrue、届かなかったらfalse)
+    GoalEnded(bool),
 }
 
 pub struct Brain {
@@ -295,6 +313,10 @@ pub struct Brain {
     pending_hang: Option<Side>,
     /// うたた寝(入力があっても、決めた時間まで眠る)
     nap: bool,
+    /// 指示された行き先(つまむ・眠ると取り消す)
+    goal: Option<Goal>,
+    /// 行き先に着いてから、まだ跳ばない残りの秒数
+    hold_left: f64,
 }
 
 impl Brain {
@@ -331,6 +353,8 @@ impl Brain {
             hang: None,
             pending_hang: None,
             nap: false,
+            goal: None,
+            hold_left: 0.0,
         }
     }
 
@@ -364,7 +388,8 @@ impl Brain {
     fn to_normal(&mut self, w: &World, to_edge: bool, events: &mut Vec<Event>) {
         self.set(State::Normal, None, events);
         let range = self.range(w);
-        if to_edge && !self.on_window() {
+        // 行き先へ向かう途中は、端に寄らない
+        if to_edge && !self.on_window() && self.goal.is_none() {
             if let Some((lo, hi)) = range {
                 let edge = if self.x < (lo + hi) / 2.0 { lo + 16.0 * w.scale } else { hi - 16.0 * w.scale };
                 self.walk_to(edge.clamp(lo, hi));
@@ -447,7 +472,8 @@ impl Brain {
             cands.push((Choice::Walk, wt.walk * mv * fav(Action::Walk)));
             // 飛び移る(同じ画面の中)と、画面を移る。行き先ごとの点数(好み × 距離)のうち、
             // いちばん高いものを行動の点数に掛け、行き先はその点数に比例して選ぶ
-            let plans = self.jump_candidates(w);
+            // 指示された行き先に着いた直後は、離れる行動を選ばない
+            let plans = if self.hold_left > 0.0 { Vec::new() } else { self.jump_candidates(w) };
             let mine = w.screen_at(self.x + w.size.0 / 2.0, self.y + w.size.1 / 2.0);
             for (action, other_screen) in [(Action::Jump, false), (Action::Screen, true)] {
                 let group: Vec<(Jump, f64)> = plans
@@ -465,7 +491,7 @@ impl Brain {
                     cands.push((Choice::Jump(group[i].0), wt.of(action) * mv * fav(action) * best));
                 }
             }
-            if let Some(side) = self.hang_side(w) {
+            if let Some(side) = self.hang_side(w).filter(|_| self.hold_left <= 0.0) {
                 cands.push((Choice::Hang(side), wt.hang * mv * fav(Action::Hang)));
             }
         }
@@ -631,6 +657,144 @@ impl Brain {
             }
         }
         out
+    }
+
+    /// 行き先へ向かう指示を出す(設計書の9節)。前の指示は置き換える。`dx` は持ち主の左端からの、着いたときの絵の左上のx
+    pub fn go_to(&mut self, owner: Owner, dx: f64) {
+        self.goal = Some(Goal { owner, dx });
+        self.hold_left = 0.0;
+        self.target_x = None;
+        self.pending_hang = None;
+        if self.activity == Activity::Walk {
+            self.activity = Activity::Idle;
+        }
+        if self.state == State::Sleep {
+            self.nap = false;
+            self.set(State::Wake, Some(1.25), &mut Vec::new());
+        }
+    }
+
+    fn end_goal(&mut self, arrived: bool, events: &mut Vec<Event>) {
+        self.goal = None;
+        events.push(Event::GoalEnded(arrived));
+        if arrived {
+            self.hold_left = GOAL_HOLD;
+            self.activity = Activity::Idle;
+            self.activity_left = 3.0;
+        } else {
+            self.set(State::React, Some(0.4), events);
+        }
+    }
+
+    /// 行き先へ1歩進める: 着いていれば終わる。同じ足場なら歩き、別の足場なら跳ぶ所まで歩いて跳ぶ。
+    /// 1回跳ぶごとに道を探し直す(途中でウィンドウが動いても追えるように)
+    fn advance_goal(&mut self, w: &World, events: &mut Vec<Event>) {
+        let (Some(goal), Some(st), Some((lo, hi))) = (self.goal, self.stand, self.range(w)) else {
+            self.end_goal(false, events);
+            return;
+        };
+        let pw = w.size.0;
+        // 足場の見えている部分は、持ち主の左端からの距離で見る(ウィンドウが動いても同じ部分を指すように)
+        let node = |owner: Owner, dx: f64| {
+            let cx = dx + pw / 2.0;
+            w.platforms
+                .iter()
+                .position(|p| p.owner == owner && cx >= p.x0 - p.anchor && cx <= p.x1 - p.anchor)
+                .or_else(|| w.platforms.iter().position(|p| p.owner == owner))
+        };
+        let (Some(here), Some(there)) = (node(st.owner, st.dx), node(goal.owner, goal.dx)) else {
+            self.end_goal(false, events);
+            return;
+        };
+        if here == there {
+            let target = (self.anchor_now + goal.dx).clamp(lo, hi);
+            if (target - self.x).abs() <= 1.0 {
+                self.move_x(target);
+                self.end_goal(true, events);
+            } else {
+                self.walk_to(target);
+            }
+            return;
+        }
+        match self.next_hop(w, here, there, goal.dx, (lo, hi)) {
+            // 跳ぶ点まで歩く。着いたら、その時の足場で道を探し直す
+            Some(plan) if (plan.from.0 - self.x).abs() > 1.0 => self.walk_to(plan.from.0),
+            Some(plan) => self.start_jump(plan, events),
+            None => self.end_goal(false, events),
+        }
+    }
+
+    /// 足場をたどる道の、最初の1回の跳ぶ計画(幅優先)。行き先へ道が無ければ、行ける足場のうち
+    /// 行き先にいちばん近い足場へ向かう。いまの足場がいちばん近ければNone
+    fn next_hop(&self, w: &World, here: usize, there: usize, goal_dx: f64, range: (f64, f64)) -> Option<Jump> {
+        let pw = w.size.0;
+        let span = |p: &Platform| (p.x0, (p.x1 - pw).max(p.x0));
+        let mut prev = vec![None; w.platforms.len()];
+        prev[here] = Some(here);
+        let mut queue = std::collections::VecDeque::from([here]);
+        while let Some(a) = queue.pop_front() {
+            if a == there {
+                break;
+            }
+            let from = w.platforms[a];
+            let (lo, hi) = if a == here { range } else { span(&from) };
+            for (b, to) in w.platforms.iter().enumerate() {
+                if prev[b].is_none() && Self::hop((lo, hi), from.y, (lo + hi) / 2.0, to, w).is_some() {
+                    prev[b] = Some(a);
+                    queue.push_back(b);
+                }
+            }
+        }
+        let g = w.platforms[there];
+        let gx = g.anchor + goal_dx + pw / 2.0;
+        let dist = |p: &Platform| {
+            let dx = (p.x0 - gx).max(gx - p.x1).max(0.0);
+            dx * dx + (p.y - g.y).powi(2)
+        };
+        let mut end = if prev[there].is_some() {
+            there
+        } else {
+            (0..w.platforms.len())
+                .filter(|i| prev[*i].is_some())
+                .min_by(|a, b| dist(&w.platforms[*a]).total_cmp(&dist(&w.platforms[*b])))?
+        };
+        if end == here {
+            return None;
+        }
+        while prev[end] != Some(here) {
+            end = prev[end]?;
+        }
+        Self::hop(range, w.platforms[here].y, self.x, &w.platforms[end], w)
+    }
+
+    /// 足場の範囲(絵の左上のxが `lo`〜`hi`、足の高さ `y`)から、足場 `to` へ1回で跳ぶ計画。届かなければNone。
+    /// 真上か真下に重なるなら `near` に近い所で、重ならなければ近い端どうしで跳ぶ
+    fn hop((lo, hi): (f64, f64), y: f64, near: f64, to: &Platform, w: &World) -> Option<Jump> {
+        let (pw, ph) = w.size;
+        if to.x1 - to.x0 < pw {
+            return None;
+        }
+        let (b0, b1) = (to.x0, to.x1 - pw);
+        let (ax, bx) = if hi < b0 {
+            (hi, b0)
+        } else if b1 < lo {
+            (lo, b1)
+        } else {
+            let x = near.clamp(lo.max(b0), hi.min(b1));
+            (x, x)
+        };
+        let reach_x = w.screens.get(w.current).map_or(1000.0, |s| s.work.w * JUMP_REACH_X);
+        if (bx - ax).abs() > reach_x || y - to.y > JUMP_REACH_UP * ph {
+            return None;
+        }
+        let (from, there) = ((ax, y - ph), (bx, to.y - ph));
+        // 画面の上のほうの足場は、いつもの弧だと画面の外を通るので、低い弧も試す
+        [
+            Jump::new(from, there, w.scale, to.owner, to.anchor),
+            Jump::timed(from, there, w.scale, to.owner, to.anchor, JUMP_TIME_MIN),
+        ]
+        .into_iter()
+        .find(|plan| plan.path_ok(w))
     }
 
     fn start_jump(&mut self, plan: Jump, events: &mut Vec<Event>) {
@@ -815,6 +979,7 @@ impl Brain {
                     self.hang = None;
                     self.pending_hang = None;
                     self.nap = false;
+                    self.goal = None;
                     self.set(State::Dangle, None, &mut events);
                 }
             }
@@ -904,11 +1069,13 @@ impl Brain {
             }
             State::Normal => {
                 if self.follow(w, &mut events) {
+                    self.hold_left = (self.hold_left - dt).max(0.0);
                     let sleepy = input.idle_seconds.is_some_and(|i| i >= input.sleep_after);
                     if sleepy {
                         self.target_x = None;
                         self.pending_hang = None;
                         self.nap = false;
+                        self.goal = None;
                         self.set(State::Sleep, None, &mut events);
                     } else if self.activity == Activity::Walk {
                         let (lo, hi) = self.range(w).unwrap_or((self.x, self.x));
@@ -919,11 +1086,18 @@ impl Brain {
                             self.target_x = None;
                             match self.pending_hang.take() {
                                 Some(side) => self.start_hang(side, w, &mut events),
+                                // 行き先へ向かう途中なら、次の計算で続きへ
+                                None if self.goal.is_some() => self.activity = Activity::Idle,
                                 None => self.choose_activity(w, &mut events),
                             }
                         } else {
                             self.facing = (target - self.x).signum();
                             self.move_x(self.x + self.facing * step);
+                        }
+                    } else if self.goal.is_some() {
+                        // 左ボタンを押している間は、新しく跳ばない(ふらるのウィンドウの操作を妨げない)
+                        if !input.button_down {
+                            self.advance_goal(w, &mut events);
                         }
                     } else {
                         self.activity_left -= dt;
@@ -1085,6 +1259,146 @@ mod tests {
         b.activity = Activity::Idle;
         b.activity_left = 100.0;
         b.step(0.016, w, &awake());
+    }
+
+    /// 普段の状態にしてから、行き先を指示し、着く・届かないまで動かす。通った足場を返す
+    fn walk_goal(b: &mut Brain, w: &World, owner: Owner, dx: f64) -> (Vec<Owner>, Vec<Event>) {
+        b.state = State::Normal;
+        b.activity = Activity::Idle;
+        b.go_to(owner, dx);
+        let (mut passed, mut ev) = (Vec::new(), Vec::new());
+        // 歩くのが遅いので、画面の端から端まで歩けるだけ動かす
+        for _ in 0..12000 {
+            let e = b.step(0.016, w, &awake());
+            let done = e.iter().any(|x| matches!(x, Event::GoalEnded(_)));
+            ev.extend(e);
+            if let Some(st) = b.stand {
+                if passed.last() != Some(&st.owner) {
+                    passed.push(st.owner);
+                }
+            }
+            if done {
+                break;
+            }
+        }
+        (passed, ev)
+    }
+
+    #[test]
+    fn 同じ床の行き先へ歩いて着き_しばらく跳ばない() {
+        let wins = [win(1, 300.0, 700.0, 500.0, 300.0)];
+        let w = with_windows(world(), &wins, None);
+        let mut b = Brain::new(&w, 7);
+        run_in(&mut b, &w, 1.1, &awake());
+        let (_, ev) = walk_goal(&mut b, &w, Owner::Floor { screen: 0 }, 1000.0);
+        assert!(ev.contains(&Event::GoalEnded(true)));
+        assert!((b.x - 1000.0).abs() <= 1.0);
+        // 飛び移る重みを上げても、着いてから60秒は床を離れない
+        let mut lively = w.clone();
+        lively.behavior.weights.jump = 10.0;
+        run_in(&mut b, &lively, 55.0, &awake());
+        assert_eq!(b.stand.map(|s| s.owner), Some(Owner::Floor { screen: 0 }));
+    }
+
+    #[test]
+    fn 一回で届かない足場へ_足場をたどって着く_重みが0で入力中でも向かう() {
+        // 床(1032)から上のウィンドウ(200)へは832で、1回で跳べる576を超える。真ん中のウィンドウを経由する
+        let wins = [win(1, 300.0, 600.0, 500.0, 300.0), win(2, 800.0, 200.0, 500.0, 300.0)];
+        let mut w = with_windows(world(), &wins, None);
+        w.behavior.weights.jump = 0.0;
+        w.behavior.weights.screen = 0.0;
+        w.busy = Some(2);
+        let mut b = Brain::new(&w, 7);
+        run_in(&mut b, &w, 1.1, &awake());
+        // 乗っているウィンドウのようすは毎回読むので、乗った足場に合わせて世界を作り直す
+        b.go_to(Owner::Window { id: 2 }, 100.0);
+        b.state = State::Normal;
+        b.activity = Activity::Idle;
+        let (mut passed, mut arrived) = (Vec::new(), false);
+        for _ in 0..12000 {
+            let riding = b.riding();
+            let mut now = with_windows(w.clone(), &wins, riding);
+            now.behavior = w.behavior;
+            now.busy = w.busy;
+            let e = b.step(0.016, &now, &awake());
+            if let Some(st) = b.stand {
+                if passed.last() != Some(&st.owner) {
+                    passed.push(st.owner);
+                }
+            }
+            if e.contains(&Event::GoalEnded(true)) {
+                arrived = true;
+                break;
+            }
+        }
+        assert!(arrived, "通った足場: {passed:?}");
+        assert!(passed.contains(&Owner::Window { id: 1 }), "通った足場: {passed:?}");
+        assert_eq!(b.stand.map(|s| s.owner), Some(Owner::Window { id: 2 }));
+        assert!((b.x - 900.0).abs() <= 1.0);
+    }
+
+    #[test]
+    fn 道が無い行き先は_近づける所でやめて反応する() {
+        // 床から732上のウィンドウへ、経由できる足場が無い
+        let wins = [win(1, 300.0, 300.0, 500.0, 300.0)];
+        let w = with_windows(world(), &wins, None);
+        let mut b = Brain::new(&w, 7);
+        run_in(&mut b, &w, 1.1, &awake());
+        let (passed, ev) = walk_goal(&mut b, &w, Owner::Window { id: 1 }, 100.0);
+        assert!(ev.contains(&Event::GoalEnded(false)));
+        assert_eq!(b.state, State::React);
+        assert_eq!(passed, vec![Owner::Floor { screen: 0 }]);
+    }
+
+    #[test]
+    fn 消えた足場が行き先なら_やめて反応する() {
+        let w = world();
+        let mut b = Brain::new(&w, 7);
+        run_in(&mut b, &w, 1.1, &awake());
+        let (_, ev) = walk_goal(&mut b, &w, Owner::Window { id: 99 }, 0.0);
+        assert!(ev.contains(&Event::GoalEnded(false)));
+    }
+
+    #[test]
+    fn つまむと行き先を取り消す() {
+        let w = world();
+        let mut b = Brain::new(&w, 7);
+        run_in(&mut b, &w, 1.1, &awake());
+        b.go_to(Owner::Floor { screen: 0 }, 0.0);
+        let at = (b.x + 60.0, b.y + 100.0);
+        b.press(at);
+        let mut down = awake();
+        down.button_down = true;
+        down.cursor = Some((at.0, at.1 - 300.0));
+        run_in(&mut b, &w, 0.1, &down);
+        assert_eq!(b.state, State::Dangle);
+        assert!(b.goal.is_none());
+    }
+
+    #[test]
+    fn 眠っているときに指示すると_起きて向かう() {
+        let w = world();
+        let mut b = Brain::new(&w, 7);
+        run_in(&mut b, &w, 1.1, &awake());
+        b.state = State::Sleep;
+        b.until = None;
+        b.go_to(Owner::Floor { screen: 0 }, 500.0);
+        assert_eq!(b.state, State::Wake);
+        let ev = run_in(&mut b, &w, 40.0, &awake());
+        assert!(ev.contains(&Event::GoalEnded(true)));
+        assert!((b.x - 500.0).abs() <= 1.0);
+    }
+
+    #[test]
+    fn 左に縦置きの画面の床へ_画面をまたいで向かう() {
+        // ふらるのWindowsの並び: 正面1920×1200、左に縦置き1080×1920(上に714はみ出す)
+        let w = world_of(vec![screen(0.0, 0.0, 1920.0, 1200.0), screen(-1080.0, -714.0, 1080.0, 1920.0)]);
+        let mut b = Brain::new(&w, 7);
+        run_in(&mut b, &w, 1.1, &awake());
+        let (passed, ev) = walk_goal(&mut b, &w, Owner::Floor { screen: 1 }, -500.0);
+        assert!(ev.contains(&Event::GoalEnded(true)), "通った足場: {passed:?}");
+        assert_eq!(b.stand.map(|s| s.owner), Some(Owner::Floor { screen: 1 }));
+        assert!((b.x + 500.0).abs() <= 1.0);
     }
 
     #[test]

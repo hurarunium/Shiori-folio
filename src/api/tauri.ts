@@ -139,6 +139,11 @@ export const api = {
   petStatus: () => invoke<PetStatus>("pet_status"),
   petSelftestPanel: (tool?: string) => invoke<void>("pet_selftest_panel", { tool: tool ?? null }),
   petSelftestClosePanel: () => invoke<void>("pet_selftest_close_panel"),
+  // 右クリックのメニューと、行き先を選ぶ画面(ペットの行動の設計書の9節)
+  petOpenMenu: () => invoke<void>("pet_open_menu"),
+  petPickStart: () => invoke<void>("pet_pick_start"),
+  petPickChoose: () => invoke<void>("pet_pick_choose"),
+  petPickCancel: () => invoke<void>("pet_pick_cancel"),
   // ペットの行動の設定(ペットの行動の設計書の6節)。保存するとペットの形のままでもすぐ効く
   petBehaviorGet: () => invoke<PetBehaviorDto>("pet_behavior_get"),
   petBehaviorSet: (behavior: PetBehavior) => invoke<PetBehavior>("pet_behavior_set", { behavior }),

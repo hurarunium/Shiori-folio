@@ -27,7 +27,12 @@ function PetView() {
       className={`pet pet--${frame.state} pet--${frame.activity}`}
       data-pet-state={frame.state}
       onMouseDown={(e) => {
-        if (e.button === 0) api.petPress().catch(() => undefined);
+        // Macのcontrol+クリックは右クリックとして扱う
+        if (e.button === 0 && !e.ctrlKey) api.petPress().catch(() => undefined);
+      }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        api.petOpenMenu().catch(() => undefined);
       }}
     >
       <div

@@ -134,6 +134,30 @@ pub fn platforms(screens: &[ScreenArea], windows: &[WinInfo], pet: (f64, f64), r
     out
 }
 
+/// 行き先を選ぶ画面で押した点から、向かう足場と、着いたときの絵の左上のxを決める(設計書の9節)。
+/// 乗れるウィンドウの中ならその上辺、無ければ点の下でいちばん近い足場、それも無ければその画面の床
+pub fn pick_target(
+    screens: &[ScreenArea],
+    windows: &[WinInfo],
+    platforms: &[Platform],
+    pet_w: f64,
+    x: f64,
+    y: f64,
+) -> Option<(Platform, f64)> {
+    // 上辺が隠れて分かれているときは、点の真上に近い部分
+    let gap = |p: &Platform| (p.x0 - x).max(x - p.x1).max(0.0);
+    let on_window = windows.iter().find(|w| w.rect.contains(x, y)).and_then(|w| {
+        platforms.iter().filter(|p| p.owner == Owner::Window { id: w.id }).min_by(|a, b| gap(a).total_cmp(&gap(b)))
+    });
+    let below = || platforms.iter().filter(|p| p.y >= y && x >= p.x0 && x <= p.x1).min_by(|a, b| a.y.total_cmp(&b.y));
+    let floor = || {
+        let screen = screen_index_at(screens, x, y)?;
+        platforms.iter().find(|p| p.owner == Owner::Floor { screen })
+    };
+    let p = *on_window.or_else(below).or_else(floor)?;
+    Some((p, (x - pet_w / 2.0).clamp(p.x0, (p.x1 - pet_w).max(p.x0))))
+}
+
 /// 点を含む画面の番号(画面全体で見る)
 pub fn screen_index_at(screens: &[ScreenArea], x: f64, y: f64) -> Option<usize> {
     screens.iter().position(|s| s.full.contains(x, y))
@@ -207,6 +231,27 @@ mod tests {
 
     fn win(id: u64, x: f64, y: f64, w: f64, h: f64) -> WinInfo {
         WinInfo { id, app: format!("app{id}"), rect: Rect::new(x, y, w, h), focused: id == 1 }
+    }
+
+    #[test]
+    fn 行き先を選ぶ_ウィンドウの中_その下の足場_床の順() {
+        let screens = [screen(0.0, 0.0, 1920.0, 1080.0)];
+        // 2は幅が狭いので足場にならない
+        let wins = [win(1, 400.0, 500.0, 600.0, 300.0), win(2, 1200.0, 500.0, 100.0, 300.0)];
+        let ps = platforms(&screens, &wins, PET, true);
+        let pick = |x, y| pick_target(&screens, &wins, &ps, PET.0, x, y).map(|(p, at)| (p.owner, at));
+        // ウィンドウの中は、その上辺。絵の真ん中が点に来る
+        assert_eq!(pick(700.0, 650.0), Some((Owner::Window { id: 1 }, 636.0)));
+        // ウィンドウの上の何も無い所は、その下でいちばん近い足場
+        assert_eq!(pick(700.0, 100.0), Some((Owner::Window { id: 1 }, 636.0)));
+        // 足場にならないウィンドウの中は、その下の足場(床)
+        assert_eq!(pick(1250.0, 650.0), Some((Owner::Floor { screen: 0 }, 1186.0)));
+        // 床より下(画面の下の帯)は、その画面の床
+        assert_eq!(pick(1500.0, 1060.0), Some((Owner::Floor { screen: 0 }, 1436.0)));
+        // 端では、絵が足場からはみ出ない
+        assert_eq!(pick(405.0, 650.0), Some((Owner::Window { id: 1 }, 400.0)));
+        // どの画面にも無い点
+        assert_eq!(pick(-500.0, 5000.0), None);
     }
 
     fn of(ps: &[Platform], id: u64) -> Vec<(f64, f64, f64)> {

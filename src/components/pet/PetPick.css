@@ -1,0 +1,44 @@
+/* 行き先を選ぶ画面(ペットの行動の設計書の9節)。薄く暗くする(完全に透明だと、Macでクリックが下へ抜けることがあるため) */
+.pet-pick {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.12);
+  font-family: var(--font-display);
+  cursor: crosshair;
+}
+
+.pet-pick__hint {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  padding: 6px 14px;
+  background: var(--bg-deep);
+  border: 1px solid var(--lamp);
+  border-radius: 8px;
+  color: var(--paper);
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.pet-pick__line {
+  position: absolute;
+  height: 4px;
+  background: var(--lamp);
+  box-shadow: 0 0 12px var(--lamp-glow), 0 0 4px var(--lamp);
+  pointer-events: none;
+}
+
+.pet-pick__label {
+  position: absolute;
+  left: 4px;
+  bottom: 6px;
+  padding: 0 6px;
+  background: var(--bg-deep);
+  border-radius: 4px;
+  color: var(--paper);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}

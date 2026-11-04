@@ -5,6 +5,8 @@ import PetView from "./components/pet/PetView";
 import PetPanel from "./components/pet/PetPanel";
 import PetBubble from "./components/pet/PetBubble";
 import PetDebug from "./components/pet/PetDebug";
+import PetMenu from "./components/pet/PetMenu";
+import PetPick from "./components/pet/PetPick";
 import { api } from "./api/tauri";
 import "./styles/tokens.css";
 
@@ -27,7 +29,11 @@ const Root =
         ? PetBubble
         : view === "pet-debug"
           ? PetDebug
-          : App;
+          : view === "pet-menu"
+            ? PetMenu
+            : view === "pet-pick"
+              ? PetPick
+              : App;
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>

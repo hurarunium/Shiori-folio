@@ -39,6 +39,14 @@ pub const PANEL: &str = "pet-panel";
 pub const BUBBLE: &str = "pet-bubble";
 /// 足場の確かめの表示(画面ごとに1つ。`SHIORI_PET_DEBUG=1` で起動したときだけ出す)
 const DEBUG_PREFIX: &str = "pet-debug-";
+/// 右クリックのメニューと、行き先を選ぶ画面(画面ごとに1つ。ペットの行動の設計書の9節)
+const MENU: &str = "pet-menu";
+const PICK_PREFIX: &str = "pet-pick-";
+const MENU_SIZE: (f64, f64) = (180.0, 52.0);
+/// 行き先を選ぶ画面は全部の画面のクリックを受けるので、放っておいても閉じる(操作できなくならないように)
+const PICK_TIMEOUT: Duration = Duration::from_secs(30);
+/// 光らせる足場を送る間隔(画面の読み込みが終わる前の分を受け取れないので、変わらなくても送る)
+const PICK_SEND_EVERY: Duration = Duration::from_millis(250);
 /// キャラクターの背丈が、画面の短いほうの辺に占める割合(縦置きの画面でも同じ大きさにするため、
 /// 高さではなく短いほうの辺で決める。ペットの行動の設計書の3.5節。ふらる、11/3)
 const HEIGHT_RATIO: f64 = 0.18;
@@ -102,9 +110,13 @@ struct Inner {
     behavior: Behavior,
     /// この起動で見かけたアプリの名前(新しい名前を見たときだけ、見かけたアプリの一覧に書く)
     seen: std::collections::HashSet<String>,
+    /// 行き先を選ぶ画面を開いた時刻(開いていなければNone)
+    picking: Option<Instant>,
+    pick_sent: Option<Instant>,
+    pick_last: Option<Platform>,
 }
 
-fn ctl() -> &'static Mutex<Inner> {
+fn ctl()-> &'static Mutex<Inner> {
     static C: OnceLock<Mutex<Inner>> = OnceLock::new();
     C.get_or_init(|| {
         Mutex::new(Inner {
@@ -133,6 +145,9 @@ fn ctl() -> &'static Mutex<Inner> {
             windows_ms: 0.0,
             behavior: Behavior::default(),
             seen: std::collections::HashSet::new(),
+            picking: None,
+            pick_sent: None,
+            pick_last: None,
         })
     })
 }
@@ -210,9 +225,16 @@ fn ensure_windows(app: &AppHandle) -> Result<(), String> {
     build(app, PET, "pet", (FRAME_W as f64, FRAME_H as f64))?;
     let panel = build(app, PANEL, "pet-panel", PANEL_SIZE)?;
     build(app, BUBBLE, "pet-bubble", BUBBLE_SIZE)?;
-    // 本と小道具の枠は、外を押したら(詩織から離れたら)閉じる
+    let menu = build(app, MENU, "pet-menu", MENU_SIZE)?;
+    // 本と小道具の枠、右クリックのメニューは、外を押したら(詩織から離れたら)閉じる
     static HOOKED: OnceLock<()> = OnceLock::new();
     if HOOKED.set(()).is_ok() {
+        let hidden = menu.clone();
+        menu.on_window_event(move |e| {
+            if let tauri::WindowEvent::Focused(false) = e {
+                let _ = hidden.hide();
+            }
+        });
         panel.on_window_event(|e| {
             if let tauri::WindowEvent::Focused(false) = e {
                 if let Some(app) = crate::notify::app() {
@@ -504,14 +526,15 @@ pub fn leave(app: &AppHandle) -> Result<(), String> {
         c.brain = None;
         c.panel_visible = false;
         c.bubble_visible = false;
+        c.picking = None;
     }
-    for label in [PANEL, BUBBLE, PET] {
+    for label in [PANEL, BUBBLE, MENU, PET] {
         if let Some(w) = window(app, label) {
             let _ = w.hide();
         }
     }
     for (label, w) in app.webview_windows() {
-        if label.starts_with(DEBUG_PREFIX) {
+        if label.starts_with(DEBUG_PREFIX) || label.starts_with(PICK_PREFIX) {
             let _ = w.hide();
         }
     }
@@ -676,8 +699,8 @@ fn tick(app: &AppHandle, dt: f64) {
     let ride = riding.map(|id| (id, windows::presence(id)));
 
     let mut c = lock();
-    // 前面のアプリが全画面かは、0.5秒ごとに見る
-    if c.fullscreen_checked.is_none_or(|t| t.elapsed() > Duration::from_millis(500)) {
+    // 前面のアプリが全画面かは、0.5秒ごとに見る(行き先を選ぶ画面は全画面なので、開いている間は見ない)
+    if c.picking.is_none() && c.fullscreen_checked.is_none_or(|t| t.elapsed() > Duration::from_millis(500)) {
         let (p, s) = (screen.monitor.position(), screen.monitor.size());
         c.fullscreen = os::foreground_covers(p.x, p.y, s.width, s.height);
         c.fullscreen_checked = Some(Instant::now());
@@ -767,7 +790,107 @@ fn tick(app: &AppHandle, dt: f64) {
         match e {
             Event::Pressed => on_pressed(app),
             Event::StateChanged(s) => shiori_log::debug(PART, "状態が変わった", &[("状態", &format!("{s:?}"))]),
+            Event::GoalEnded(arrived) => {
+                shiori_log::info(PART, if arrived { "行き先に着いた" } else { "行き先に届かなかった" }, &[]);
+            }
         }
+    }
+    update_pick(app);
+}
+
+// ---- 右クリックのメニューと、行き先を選ぶ画面(ペットの行動の設計書の9節) ----
+
+fn show_menu(app: &AppHandle) {
+    let (Some(w), Some((cx, cy))) = (window(app, MENU), cursor_position(app)) else { return };
+    let Some(screen) = screen_at(app, cx, cy) else { return };
+    let (mw, mh) = (MENU_SIZE.0 * screen.logical, MENU_SIZE.1 * screen.logical);
+    let (wx, wy, ww, wh) = screen.work;
+    let _ = set_window_position(&w, cx.min(wx + ww - mw).max(wx), cy.min(wy + wh - mh).max(wy));
+    let _ = w.show();
+    let _ = w.set_focus();
+}
+
+fn open_pick(app: &AppHandle) {
+    if let Some(w) = window(app, MENU) {
+        let _ = w.hide();
+    }
+    if !is_active() {
+        return;
+    }
+    {
+        let mut c = lock();
+        c.picking = Some(Instant::now());
+        c.pick_sent = None;
+        c.pick_last = None;
+    }
+    let cursor = cursor_position(app);
+    for (i, s) in all_screens(app).iter().enumerate() {
+        let (x, y, w, h) = s.full;
+        let Ok(win) = build(app, &format!("{PICK_PREFIX}{i}"), "pet-pick", (w / s.logical, h / s.logical)) else {
+            continue;
+        };
+        let _ = win.set_size(LogicalSize::new(w / s.logical, h / s.logical));
+        let _ = set_window_position(&win, x, y);
+        let _ = win.show();
+        // Escを受けられるよう、マウスのある画面の窓を前に出す
+        if cursor.is_some_and(|(cx, cy)| cx >= x && cx < x + w && cy >= y && cy < y + h) {
+            let _ = win.set_focus();
+        }
+    }
+    shiori_log::info(PART, "行き先を選ぶ画面を開いた", &[]);
+}
+
+fn close_pick(app: &AppHandle, why: &str) {
+    if lock().picking.take().is_none() {
+        return;
+    }
+    for (label, w) in app.webview_windows() {
+        if label.starts_with(PICK_PREFIX) {
+            let _ = w.hide();
+        }
+    }
+    shiori_log::info(PART, "行き先を選ぶ画面を閉じた", &[("理由", &why)]);
+}
+
+/// いまのマウスの位置で向かう足場
+fn pick_at_cursor(app: &AppHandle) -> Option<(Platform, f64)> {
+    let (x, y) = cursor_position(app)?;
+    let c = lock();
+    surfaces::pick_target(&c.screens, &c.windows, &c.platforms, FRAME_W as f64 * c.dot, x, y)
+}
+
+/// 開いている間、マウスの下の行き先を、画面ごとの表示へ送る
+fn update_pick(app: &AppHandle) {
+    let Some(opened) = lock().picking else { return };
+    if opened.elapsed() >= PICK_TIMEOUT {
+        close_pick(app, "時間切れ");
+        return;
+    }
+    let target = pick_at_cursor(app).map(|(p, _)| p);
+    {
+        let mut c = lock();
+        if target == c.pick_last && c.pick_sent.is_some_and(|t| t.elapsed() < PICK_SEND_EVERY) {
+            return;
+        }
+        c.pick_last = target;
+        c.pick_sent = Some(Instant::now());
+    }
+    let c = lock();
+    let label = target.map(|p| match p.owner {
+        surfaces::Owner::Floor { .. } => "床".to_string(),
+        surfaces::Owner::Window { id } => c.windows.iter().find(|w| w.id == id).map_or(String::new(), |w| w.app.clone()),
+    });
+    drop(c);
+    for (i, s) in all_screens(app).iter().enumerate() {
+        let (sx, sy, _, _) = s.full;
+        let line = target.zip(label.clone()).map(|(p, label)| DebugLine {
+            x: (p.x0 - sx) / s.logical,
+            y: (p.y - sy) / s.logical,
+            w: (p.x1 - p.x0) / s.logical,
+            label,
+            floor: matches!(p.owner, surfaces::Owner::Floor { .. }),
+        });
+        let _ = app.emit_to(format!("{PICK_PREFIX}{i}").as_str(), "pet://pick-target", line);
     }
 }
 
@@ -966,6 +1089,34 @@ pub fn pet_press(app: AppHandle) {
     if let (Some(cur), Some(b)) = (cursor, lock().brain.as_mut()) {
         b.press(cur);
     }
+}
+
+/// ペットの絵を右クリックした
+#[tauri::command]
+pub async fn pet_open_menu(app: AppHandle) {
+    show_menu(&app);
+}
+
+/// メニューの「ここに移動して」(窓を作ることがあるので、非同期の中で行う)
+#[tauri::command]
+pub async fn pet_pick_start(app: AppHandle) {
+    open_pick(&app);
+}
+
+/// 行き先を選ぶ画面を押した: マウスの下の足場へ向かう
+#[tauri::command]
+pub async fn pet_pick_choose(app: AppHandle) {
+    let target = pick_at_cursor(&app);
+    if let (Some((p, x)), Some(b)) = (target, lock().brain.as_mut()) {
+        b.go_to(p.owner, x - p.anchor);
+    }
+    close_pick(&app, "行き先を選んだ");
+}
+
+/// 行き先を選ぶのをやめる(Escか右クリック)
+#[tauri::command]
+pub async fn pet_pick_cancel(app: AppHandle) {
+    close_pick(&app, "やめた");
 }
 
 #[derive(Serialize)]

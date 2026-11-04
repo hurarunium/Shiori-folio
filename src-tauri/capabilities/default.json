@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for the main window and the pet windows (Ver6.0 stage 4)",
-  "windows": ["main", "pet", "pet-panel", "pet-bubble", "pet-debug-*"],
+  "windows": ["main", "pet", "pet-panel", "pet-bubble", "pet-debug-*", "pet-menu", "pet-pick-*"],
   "permissions": [
     "core:default",
     "core:event:default",

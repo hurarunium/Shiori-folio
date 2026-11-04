@@ -1,0 +1,29 @@
+/* ペットの右クリックのメニュー(ペットの行動の設計書の9節)。吹き出しと同じ、縁に橙(--lamp) */
+.pet-menu {
+  position: fixed;
+  inset: 2px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 4px;
+  background: var(--bg-deep);
+  border: 1px solid var(--lamp);
+  border-radius: 8px;
+  font-family: var(--font-display);
+}
+
+.pet-menu__item {
+  padding: 8px 10px;
+  background: none;
+  border: none;
+  border-radius: 5px;
+  color: var(--paper);
+  font: inherit;
+  font-size: var(--fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.pet-menu__item:hover {
+  background: var(--lamp-glow);
+}
