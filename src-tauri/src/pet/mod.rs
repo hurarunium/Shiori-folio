@@ -739,7 +739,13 @@ fn tick(app: &AppHandle, dt: f64) {
     c.world = Some(world);
     drop(c);
 
-    if resized {
+    // Windowsは、倍率の違う画面へ窓が移ると、ドットの倍率が同じでもOSが窓の大きさを変える。
+    // 変えられたままだと絵が縮み、足元が足場から浮くので、本来の大きさに戻す(11/4)
+    let target = (FRAME_W * scale, FRAME_H * scale);
+    let drifted = cfg!(windows) && pet.outer_size().is_ok_and(|z| (z.width, z.height) != target);
+    if drifted {
+        let _ = pet.set_size(PhysicalSize::new(target.0, target.1));
+    } else if resized {
         let _ = set_pet_size(&pet, &screen);
     }
     if moved {
