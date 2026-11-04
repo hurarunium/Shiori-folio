@@ -27,13 +27,17 @@ const JUMP_REACH_UP: f64 = 3.0;
 const JUMP_SAMPLES: usize = 16;
 /// 跳ぶのにかける、いちばん短い秒数(これがいちばん低い弧になる)
 const JUMP_TIME_MIN: f64 = 0.45;
-/// 縁に座るとき、絵を下げる量(ドット)。足を垂らす絵(Phase 5)に合わせて決める。それまでは下げない
-const SIT_DROP: f64 = 0.0;
-/// ぶら下がるとき、絵の上端を縁から上げる量と、手を縁にかける幅(ドット)。ぶら下がる絵(Phase 5)に合わせて決める
-const HANG_TOP: f64 = 20.0;
-const HANG_GRIP: f64 = 30.0;
+/// 縁に座るとき、絵を下げる量(ドット)。足を垂らす絵の、お尻の高さ(上から125行目)を縁に合わせる
+const SIT_DROP: f64 = 67.0;
+/// ぶら下がるとき、絵の上端を縁から上げる量と、手を縁にかける幅(ドット)。
+/// ぶら下がる絵の手に合わせた値で、絵を作る source/finish_ledge.py にも同じ値がある
+const HANG_TOP: f64 = 8.0;
+const HANG_GRIP: f64 = 22.0;
 /// 登るのにかかる秒数
 const CLIMB_TIME: f64 = 1.0;
+/// 登る絵の姿ごとの、ぶら下がる位置から立つ位置まで動いた割合(横, 縦)。
+/// 手が縁の上を滑らないよう、位置は姿と一緒に切り替える。finish_ledge.py にも同じ値がある
+const CLIMB_KEYS: [(f64, f64); 4] = [(0.15, 0.2), (0.45, 0.45), (0.52, 0.65), (1.0, 1.0)];
 /// 入力中とみなす、最後の入力からの秒数(設計書の5節)
 pub const BUSY_SECONDS: f64 = 10.0;
 /// 指示された行き先に着いたあと、跳ばない秒数(すぐ離れないため。設計書の9節)
@@ -581,8 +585,9 @@ impl Brain {
             Side::Right => (r.right() - pw, r.y - ph),
             Side::Left => (r.x, r.y - ph),
         };
-        let k = (self.state_t / CLIMB_TIME).clamp(0.0, 1.0);
-        (hang.0 + (stand.0 - hang.0) * k, hang.1 + (stand.1 - hang.1) * k)
+        let i = ((self.state_t / CLIMB_TIME) * CLIMB_KEYS.len() as f64) as usize;
+        let (kx, ky) = CLIMB_KEYS[i.min(CLIMB_KEYS.len() - 1)];
+        (hang.0 + (stand.0 - hang.0) * kx, hang.1 + (stand.1 - hang.1) * ky)
     }
 
     fn start_hang(&mut self, side: Side, w: &World, events: &mut Vec<Event>) {

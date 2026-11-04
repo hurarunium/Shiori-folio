@@ -33,6 +33,12 @@ const DEFAULT_FILES: &[(&str, &[u8])] = &[
     ("land.png", include_bytes!("../../../src/assets/pet/land.png")),
     ("happy.png", include_bytes!("../../../src/assets/pet/happy.png")),
     ("appear.png", include_bytes!("../../../src/assets/pet/appear.png")),
+    ("jump_on.png", include_bytes!("../../../src/assets/pet/jump_on.png")),
+    ("jump_off.png", include_bytes!("../../../src/assets/pet/jump_off.png")),
+    ("perch_stand.png", include_bytes!("../../../src/assets/pet/perch_stand.png")),
+    ("perch_sit.png", include_bytes!("../../../src/assets/pet/perch_sit.png")),
+    ("hang.png", include_bytes!("../../../src/assets/pet/hang.png")),
+    ("climb.png", include_bytes!("../../../src/assets/pet/climb.png")),
 ];
 
 fn default_file(name: &str) -> Option<Vec<u8>> {
@@ -149,7 +155,7 @@ impl Sprites {
 
     /// 動きの絵。無ければ `idle`。
     pub fn anim(&self, name: &str) -> (&str, &Anim) {
-        // ペットの行動の設計書の新しい動きは、絵ができるまで近い動きの絵を使う(7節)
+        // ふらるが差し替えた絵の組に新しい動きの絵が無いときは、近い動きの絵を使う(ペットの行動の設計書の7節)
         let near = match name {
             "jump_on" => "fly",
             "jump_off" => "fall",

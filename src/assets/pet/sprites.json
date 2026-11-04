@@ -14,6 +14,12 @@
     "react": { "file": "react.png", "frames": 4, "loop": false },
     "land": { "file": "land.png", "frames": 4, "loop": false },
     "happy": { "file": "happy.png", "frames": 16, "loop": false },
-    "appear": { "file": "appear.png", "frames": 8, "loop": false }
+    "appear": { "file": "appear.png", "frames": 8, "loop": false },
+    "jump_on": { "file": "jump_on.png", "frames": 4, "loop": false },
+    "jump_off": { "file": "jump_off.png", "frames": 4, "loop": false },
+    "perch_stand": { "file": "perch_stand.png", "frames": 32, "loop": true },
+    "perch_sit": { "file": "perch_sit.png", "frames": 32, "loop": true },
+    "hang": { "file": "hang.png", "frames": 16, "loop": true },
+    "climb": { "file": "climb.png", "frames": 8, "loop": false }
   }
 }
