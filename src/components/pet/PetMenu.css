@@ -27,3 +27,17 @@
 .pet-menu__item:hover {
   background: var(--lamp-glow);
 }
+
+.pet-menu__label {
+  margin-top: 4px;
+  padding: 6px 10px 2px;
+  border-top: 1px solid var(--lamp-glow);
+  color: var(--paper-dim);
+  font-size: var(--fs-xs);
+}
+
+.pet-menu__mark {
+  display: inline-block;
+  width: 1.2em;
+  color: var(--lamp);
+}

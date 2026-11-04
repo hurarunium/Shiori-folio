@@ -15,6 +15,8 @@ import type {
   Notice,
   PetBehavior,
   PetBehaviorDto,
+  PetModeDto,
+  PetModeSetting,
   PetSeenApp,
   PetStatus,
   SelfTestMode,
@@ -144,6 +146,9 @@ export const api = {
   petPickStart: () => invoke<void>("pet_pick_start"),
   petPickChoose: () => invoke<void>("pet_pick_choose"),
   petPickCancel: () => invoke<void>("pet_pick_cancel"),
+  // 普段と作業中のモード(ペットの行動の設計書の10節)
+  petModeGet: () => invoke<PetModeDto>("pet_mode_get"),
+  petModeSet: (setting: PetModeSetting) => invoke<void>("pet_mode_set", { setting }),
   // ペットの行動の設定(ペットの行動の設計書の6節)。保存するとペットの形のままでもすぐ効く
   petBehaviorGet: () => invoke<PetBehaviorDto>("pet_behavior_get"),
   petBehaviorSet: (behavior: PetBehavior) => invoke<PetBehavior>("pet_behavior_set", { behavior }),

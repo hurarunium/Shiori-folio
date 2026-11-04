@@ -121,6 +121,70 @@ pub struct AppPref {
     /// その上でしやすい行動(点数を3倍にする)
     #[serde(default)]
     pub favorite: Option<Action>,
+    /// 作業アプリ(前面に来ると、作業中のモードに入る。設計書の10節)
+    #[serde(default)]
+    pub work: bool,
+}
+
+/// いまのモード(設計書の10節)
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    Normal,
+    Work,
+}
+
+/// モードの決め方。自動か、どちらかに固定するか
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ModeSetting {
+    #[default]
+    Auto,
+    Normal,
+    Work,
+}
+
+/// 作業アプリが前面でなくなってから、普段に戻るまでの秒数(初めの値)
+pub const WORK_LINGER_SECS: f64 = 300.0;
+
+impl ModeSetting {
+    /// `since_work_front` は、作業アプリが最後に前面にあってからの秒数(この形のあいだ前面に来ていなければNone)
+    pub fn decide(self, since_work_front: Option<f64>) -> Mode {
+        match self {
+            ModeSetting::Normal => Mode::Normal,
+            ModeSetting::Work => Mode::Work,
+            ModeSetting::Auto if since_work_front.is_some_and(|s| s < WORK_LINGER_SECS) => Mode::Work,
+            ModeSetting::Auto => Mode::Normal,
+        }
+    }
+}
+
+/// モードごとの活発さと行動の重み
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ModeValues {
+    pub activity: u8,
+    pub weights: Weights,
+}
+
+impl Default for ModeValues {
+    /// 作業中の初めの値: 本を読み続け、ほとんど動かない
+    fn default() -> Self {
+        let weights = Weights { stand: 2.0, sit: 0.0, read: 10.0, walk: 0.0, jump: 0.0, screen: 0.0, hang: 0.0, climb: 0.0, sleep: 1.0 };
+        Self { activity: 1, weights }
+    }
+}
+
+impl ModeValues {
+    /// 動く行動(歩く・飛び移る・画面を移る・ぶら下がる)の点数に掛ける倍率
+    pub fn move_factor(&self) -> f64 {
+        [0.25, 0.5, 1.0, 2.0, 4.0][(self.activity.clamp(1, 5) - 1) as usize]
+    }
+
+    /// 次の行動を選ぶまでの時間に掛ける倍率
+    pub fn time_factor(&self) -> f64 {
+        [2.0, 1.5, 1.0, 0.75, 0.5][(self.activity.clamp(1, 5) - 1) as usize]
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
@@ -128,9 +192,12 @@ pub struct AppPref {
 pub struct Behavior {
     /// ウィンドウに乗る行動(オフなら今までどおり床の上だけ)
     pub enabled: bool,
-    /// 活発さ(1〜5)
+    /// 活発さ(1〜5)。この項目と `weights` は、普段のモードの値
     pub activity: u8,
     pub weights: Weights,
+    /// 作業中のモードの値
+    pub work: ModeValues,
+    pub mode_setting: ModeSetting,
     /// 入力中のウィンドウの上では静かにする
     pub quiet_on_focused: bool,
     /// 全画面のアプリが前面のときは、その画面のウィンドウに乗らない
@@ -166,6 +233,8 @@ impl Preset {
             enabled: true,
             activity,
             weights: Weights { stand, sit, read, walk, jump, screen, hang, climb, sleep },
+            work: ModeValues::default(),
+            mode_setting: ModeSetting::default(),
             quiet_on_focused: true,
             no_ride_fullscreen: true,
             apps: Vec::new(),
@@ -191,22 +260,26 @@ impl Behavior {
     pub fn normalized(mut self) -> Self {
         self.activity = self.activity.clamp(1, 5);
         self.weights = self.weights.clamped();
+        self.work.activity = self.work.activity.clamp(1, 5);
+        self.work.weights = self.work.weights.clamped();
         self
     }
 
-    /// 動く行動(歩く・飛び移る・画面を移る・ぶら下がる)の点数に掛ける倍率
-    pub fn move_factor(&self) -> f64 {
-        [0.25, 0.5, 1.0, 2.0, 4.0][(self.activity.clamp(1, 5) - 1) as usize]
-    }
-
-    /// 次の行動を選ぶまでの時間に掛ける倍率
-    pub fn time_factor(&self) -> f64 {
-        [2.0, 1.5, 1.0, 0.75, 0.5][(self.activity.clamp(1, 5) - 1) as usize]
+    /// そのモードの活発さと行動の重み
+    pub fn values(&self, mode: Mode) -> ModeValues {
+        match mode {
+            Mode::Normal => ModeValues { activity: self.activity, weights: self.weights },
+            Mode::Work => self.work,
+        }
     }
 
     /// アプリ名から好みを引く(大文字・小文字は区別しない)。登録が無ければNone(普通)
     pub fn pref_of(&self, app: &str) -> Option<&AppPref> {
         self.apps.iter().find(|p| p.names.iter().any(|n| n.eq_ignore_ascii_case(app)))
+    }
+
+    pub fn is_work_app(&self, app: &str) -> bool {
+        self.pref_of(app).is_some_and(|p| p.work)
     }
 }
 
@@ -304,8 +377,47 @@ mod tests {
     fn 活発さの倍率() {
         let mut b = Behavior::default();
         b.activity = 1;
-        assert_eq!((b.move_factor(), b.time_factor()), (0.25, 2.0));
+        let v = b.values(Mode::Normal);
+        assert_eq!((v.move_factor(), v.time_factor()), (0.25, 2.0));
         b.activity = 5;
-        assert_eq!((b.move_factor(), b.time_factor()), (4.0, 0.5));
+        let v = b.values(Mode::Normal);
+        assert_eq!((v.move_factor(), v.time_factor()), (4.0, 0.5));
+    }
+
+    #[test]
+    fn モードの自動は作業アプリが前面から離れて5分で戻り_固定はそのまま() {
+        assert_eq!(ModeSetting::Auto.decide(None), Mode::Normal);
+        assert_eq!(ModeSetting::Auto.decide(Some(0.0)), Mode::Work);
+        assert_eq!(ModeSetting::Auto.decide(Some(299.0)), Mode::Work);
+        assert_eq!(ModeSetting::Auto.decide(Some(300.0)), Mode::Normal);
+        assert_eq!(ModeSetting::Normal.decide(Some(0.0)), Mode::Normal);
+        assert_eq!(ModeSetting::Work.decide(None), Mode::Work);
+    }
+
+    #[test]
+    fn モードの項目が無い前の設定は_今の値を普段として読む() {
+        let b: Behavior =
+            serde_json::from_str(r#"{ "activity": 5, "weights": { "jump": 9 }, "apps": [ { "names": ["Claude"], "like": "love" } ] }"#)
+                .unwrap();
+        assert_eq!(b.values(Mode::Normal).activity, 5);
+        assert_eq!(b.values(Mode::Normal).weights.jump, 9.0);
+        assert_eq!(b.values(Mode::Work), ModeValues::default());
+        assert_eq!(b.mode_setting, ModeSetting::Auto);
+        assert!(!b.is_work_app("Claude"));
+    }
+
+    #[test]
+    fn 作業アプリは名前のどれかで引き_作業中の値も範囲に収める() {
+        let b: Behavior = serde_json::from_str(
+            r#"{ "work": { "activity": 9, "weights": { "read": 40 } }, "modeSetting": "work",
+                 "apps": [ { "names": ["Claude", "claude"], "work": true } ] }"#,
+        )
+        .unwrap();
+        let b = b.normalized();
+        assert!(b.is_work_app("CLAUDE"));
+        assert!(!b.is_work_app("Discord"));
+        assert_eq!(b.work.activity, 5);
+        assert_eq!(b.work.weights.read, 10.0);
+        assert_eq!(b.mode_setting, ModeSetting::Work);
     }
 }

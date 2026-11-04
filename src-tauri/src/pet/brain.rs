@@ -6,7 +6,7 @@
 //! いる場所(居場所)は、画面ごとの床か、ほかのアプリのウィンドウの上辺。全部の画面をつなげた1つの世界で動き、
 //! 隣に画面が無い辺だけを壁と天井にする。乗っているウィンドウが動けば一緒に動き、閉じる・隠れると落ちる。
 
-use super::behavior::{Action, Behavior, Weights, FAVORITE};
+use super::behavior::{Action, Behavior, Mode, Weights, FAVORITE};
 use super::surfaces::{self, Owner, Platform, Presence, Rect, ScreenArea};
 use serde::Serialize;
 
@@ -104,15 +104,17 @@ pub struct Params {
     pub time_factor: f64,
 }
 
-impl From<&Behavior> for Params {
-    fn from(b: &Behavior) -> Self {
-        Self { weights: b.weights, move_factor: b.move_factor(), time_factor: b.time_factor() }
+impl Params {
+    /// そのモードの値から作る
+    pub fn of(b: &Behavior, mode: Mode) -> Self {
+        let v = b.values(mode);
+        Self { weights: v.weights, move_factor: v.move_factor(), time_factor: v.time_factor() }
     }
 }
 
 impl Default for Params {
     fn default() -> Self {
-        Self::from(&Behavior::default())
+        Self::of(&Behavior::default(), Mode::Normal)
     }
 }
 
@@ -1282,6 +1284,20 @@ mod tests {
             }
         }
         (passed, ev)
+    }
+
+    #[test]
+    fn 作業中の初めの値では_床から動かない() {
+        let wins = [win(1, 300.0, 700.0, 500.0, 300.0)];
+        let mut w = with_windows(world(), &wins, None);
+        w.behavior = Params::of(&Behavior::default(), Mode::Work);
+        let mut b = Brain::new(&w, 7);
+        // 現れたあとの端への歩きを終える
+        run_in(&mut b, &w, 60.0, &awake());
+        let x = b.x;
+        run_in(&mut b, &w, 300.0, &awake());
+        assert_eq!(b.stand.map(|s| s.owner), Some(Owner::Floor { screen: 0 }));
+        assert_eq!(b.x, x);
     }
 
     #[test]

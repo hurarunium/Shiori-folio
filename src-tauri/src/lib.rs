@@ -5743,6 +5743,8 @@ pub fn run() {
             pet::pet_pick_start,
             pet::pet_pick_choose,
             pet::pet_pick_cancel,
+            pet::pet_mode_get,
+            pet::pet_mode_set,
             pet::pet_sprites,
             pet::pet_bubble_done,
             pet::pet_open_source,

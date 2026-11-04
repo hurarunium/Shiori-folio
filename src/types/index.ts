@@ -318,12 +318,30 @@ export interface PetAppPref {
   names: string[];
   like: PetLike;
   favorite: PetAction | null;
+  // 作業アプリ(前面に来ると、作業中のモードに入る)
+  work: boolean;
+}
+
+export type PetMode = "normal" | "work";
+export type PetModeSetting = "auto" | PetMode;
+
+export interface PetModeDto {
+  setting: PetModeSetting;
+  mode: PetMode;
+}
+
+export interface PetModeValues {
+  activity: number;
+  weights: Record<PetAction, number>;
 }
 
 export interface PetBehavior {
   enabled: boolean;
+  // activityとweightsは、普段のモードの値
   activity: number;
   weights: Record<PetAction, number>;
+  work: PetModeValues;
+  modeSetting: PetModeSetting;
   quietOnFocused: boolean;
   noRideFullscreen: boolean;
   apps: PetAppPref[];

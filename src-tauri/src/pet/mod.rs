@@ -20,7 +20,7 @@ pub mod windows;
 use crate::error_codes;
 use crate::notify::{Kind, Notice};
 use crate::shiori_log;
-use behavior::{Behavior, Like, Preset, SeenApp};
+use behavior::{Behavior, Like, Mode, ModeSetting, Preset, SeenApp};
 use brain::{Brain, Event, Input, World};
 use serde::Serialize;
 use serde_json::Value;
@@ -42,7 +42,9 @@ const DEBUG_PREFIX: &str = "pet-debug-";
 /// 右クリックのメニューと、行き先を選ぶ画面(画面ごとに1つ。ペットの行動の設計書の9節)
 const MENU: &str = "pet-menu";
 const PICK_PREFIX: &str = "pet-pick-";
-const MENU_SIZE: (f64, f64) = (180.0, 52.0);
+const MENU_SIZE: (f64, f64) = (200.0, 196.0);
+/// 作業に使っている画面とみなす、カーソルが最後に入ってからの時間(ペットの行動の設計書の10節。初めの値)
+const CURSOR_RECENT: Duration = Duration::from_secs(180);
 /// 行き先を選ぶ画面は全部の画面のクリックを受けるので、放っておいても閉じる(操作できなくならないように)
 const PICK_TIMEOUT: Duration = Duration::from_secs(30);
 /// 光らせる足場を送る間隔(画面の読み込みが終わる前の分を受け取れないので、変わらなくても送る)
@@ -114,9 +116,13 @@ struct Inner {
     picking: Option<Instant>,
     pick_sent: Option<Instant>,
     pick_last: Option<Platform>,
+    /// いまのモードと、作業アプリが最後に前面にあった時刻、画面ごとにカーソルが最後に入った時刻
+    mode: Mode,
+    work_front_at: Option<Instant>,
+    cursor_seen: std::collections::HashMap<usize, Instant>,
 }
 
-fn ctl()-> &'static Mutex<Inner> {
+fn ctl() -> &'static Mutex<Inner> {
     static C: OnceLock<Mutex<Inner>> = OnceLock::new();
     C.get_or_init(|| {
         Mutex::new(Inner {
@@ -148,6 +154,9 @@ fn ctl()-> &'static Mutex<Inner> {
             picking: None,
             pick_sent: None,
             pick_last: None,
+            mode: Mode::Normal,
+            work_front_at: None,
+            cursor_seen: std::collections::HashMap::new(),
         })
     })
 }
@@ -427,7 +436,7 @@ fn world_of(
         platforms,
         ride,
         caption: caption_of(screen),
-        behavior: brain::Params::from(&c.behavior),
+        behavior: brain::Params::of(&c.behavior, c.mode),
         prefs: c
             .windows
             .iter()
@@ -478,6 +487,10 @@ pub fn enter(app: &AppHandle) -> Result<(), String> {
         c.dot = screen.dot;
         c.fullscreen = false;
         c.behavior = load_behavior();
+        // 普段から始める。作業中なら、現れたあとの最初の見直しで切り替えて移る
+        c.mode = Mode::Normal;
+        c.work_front_at = None;
+        c.cursor_seen.clear();
     }
     // 現れる床を決めるため、先に画面とウィンドウを読む
     refresh_surfaces(app);
@@ -798,6 +811,53 @@ fn tick(app: &AppHandle, dt: f64) {
     update_pick(app);
 }
 
+// ---- 普段と作業中のモード(ペットの行動の設計書の10節) ----
+
+/// カーソルと前面のウィンドウを見て、モードを見直す。作業中に入ったら、使っていない画面か端へ向かう
+fn update_mode(app: &AppHandle) {
+    let cursor = cursor_position(app);
+    let mut guard = lock();
+    let c = &mut *guard;
+    let Some(b) = c.brain.as_mut() else { return };
+    let now = Instant::now();
+    if let Some(i) = cursor.and_then(|(x, y)| surfaces::screen_index_at(&c.screens, x, y)) {
+        c.cursor_seen.insert(i, now);
+    }
+    if c.windows.iter().any(|w| w.focused && c.behavior.is_work_app(&w.app)) {
+        c.work_front_at = Some(now);
+    }
+    let mode = c.behavior.mode_setting.decide(c.work_front_at.map(|t| t.elapsed().as_secs_f64()));
+    if mode == c.mode {
+        return;
+    }
+    c.mode = mode;
+    if mode == Mode::Work && !b.grabbing() {
+        let (pw, ph) = (FRAME_W as f64 * c.dot, FRAME_H as f64 * c.dot);
+        let here = surfaces::screen_index_at(&c.screens, b.x + pw / 2.0, b.y + ph / 2.0).unwrap_or(0);
+        let recent: Vec<usize> =
+            c.cursor_seen.iter().filter(|(_, t)| t.elapsed() < CURSOR_RECENT).map(|(i, _)| *i).collect();
+        let behavior = &c.behavior;
+        let used = surfaces::used_screens(&c.screens, &c.windows, |w| behavior.is_work_app(&w.app), &recent);
+        let target = surfaces::retreat_target(&c.screens, &c.windows, &c.platforms, pw, 16.0 * c.dot, &used, here);
+        if let Some((p, x)) = target {
+            b.go_to(p.owner, x - p.anchor);
+        }
+    }
+    drop(guard);
+    shiori_log::info(PART, "モードを切り替えた", &[("モード", &format!("{mode:?}"))]);
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ModeDto {
+    setting: ModeSetting,
+    mode: Mode,
+}
+
+fn mode_dto(c: &Inner) -> ModeDto {
+    ModeDto { setting: c.behavior.mode_setting, mode: c.mode }
+}
+
 // ---- 右クリックのメニューと、行き先を選ぶ画面(ペットの行動の設計書の9節) ----
 
 fn show_menu(app: &AppHandle) {
@@ -806,6 +866,7 @@ fn show_menu(app: &AppHandle) {
     let (mw, mh) = (MENU_SIZE.0 * screen.logical, MENU_SIZE.1 * screen.logical);
     let (wx, wy, ww, wh) = screen.work;
     let _ = set_window_position(&w, cx.min(wx + ww - mw).max(wx), cy.min(wy + wh - mh).max(wy));
+    let _ = app.emit_to(MENU, "pet://menu-open", mode_dto(&lock()));
     let _ = w.show();
     let _ = w.set_focus();
 }
@@ -941,6 +1002,7 @@ fn refresh_surfaces(app: &AppHandle) {
     if !new_apps.is_empty() {
         note_seen(new_apps);
     }
+    update_mode(app);
     // 確かめの表示は、読み込み終わる前に送った分を受け取れないので、変わらなくても毎回送る
     if debug_enabled() {
         if screens_changed {
@@ -1047,13 +1109,10 @@ pub async fn pet_behavior_get() -> Result<BehaviorDto, String> {
 #[tauri::command]
 pub async fn pet_behavior_set(behavior: Behavior) -> Result<Behavior, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let b = behavior.normalized();
-        let path = behavior_path();
-        let text = serde_json::to_string_pretty(&b).map_err(|e| e.to_string())?;
-        path.parent()
-            .map_or(Ok(()), std::fs::create_dir_all)
-            .and_then(|_| std::fs::write(&path, text))
-            .map_err(|e| format!("ペットの行動の設定を書けない: {e}"))?;
+        let mut b = behavior.normalized();
+        // モードの決め方は右クリックのメニューで変える。開いたままの設定画面の古い値で戻さないよう、ファイルの値を残す
+        b.mode_setting = load_behavior().mode_setting;
+        write_behavior(&b)?;
         let mut c = lock();
         c.behavior = b.clone();
         // 乗れるウィンドウ(避けるアプリ・オンオフ)を、次の計算で読み直す
@@ -1061,6 +1120,47 @@ pub async fn pet_behavior_set(behavior: Behavior) -> Result<Behavior, String> {
         drop(c);
         shiori_log::info(PART, "ペットの行動の設定を保存した", &[("活発さ", &b.activity), ("アプリ", &b.apps.len())]);
         Ok(b)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn write_behavior(b: &Behavior) -> Result<(), String> {
+    let path = behavior_path();
+    let text = serde_json::to_string_pretty(b).map_err(|e| e.to_string())?;
+    path.parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|_| std::fs::write(&path, text))
+        .map_err(|e| format!("ペットの行動の設定を書けない: {e}"))
+}
+
+/// いまのモードと、その決め方(右クリックのメニューに出す)
+#[tauri::command]
+pub fn pet_mode_get() -> ModeDto {
+    mode_dto(&lock())
+}
+
+/// モードの決め方を変えて保存する(右クリックのメニューから)。設定ファイルが壊れていれば、上書きせずに断る
+#[tauri::command]
+pub async fn pet_mode_set(app: AppHandle, setting: ModeSetting) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (mut b, err) = Behavior::load(&behavior_path());
+        if let Some(e) = err {
+            shiori_log::warn(error_codes::PET_006.code, "ペットの行動の設定を読めないので、モードを保存しない", &[("理由", &e)]);
+            return Err(e);
+        }
+        b.mode_setting = setting;
+        write_behavior(&b)?;
+        let mut c = lock();
+        c.behavior.mode_setting = setting;
+        // 次の計算でモードを見直す
+        c.windows_checked = None;
+        drop(c);
+        if let Some(w) = window(&app, MENU) {
+            let _ = w.hide();
+        }
+        shiori_log::info(PART, "モードの決め方を変えた", &[("決め方", &format!("{setting:?}"))]);
+        Ok(())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1198,6 +1298,8 @@ pub struct PetStatus {
     on_floor: bool,
     /// いまの居場所(床かウィンドウか)
     stand: Option<brain::Stand>,
+    /// 普段か作業中か(`mode` はペットの形かウィンドウの形か)
+    behavior_mode: Mode,
     main_visible: bool,
     pet_visible: bool,
     panel_visible: bool,
@@ -1239,6 +1341,7 @@ pub fn pet_status(app: AppHandle) -> PetStatus {
         floor,
         on_floor,
         stand: c.brain.as_ref().and_then(|b| b.stand),
+        behavior_mode: c.mode,
         main_visible: visible("main"),
         pet_visible: visible(PET),
         panel_visible: visible(PANEL),

@@ -158,6 +158,41 @@ pub fn pick_target(
     Some((p, (x - pet_w / 2.0).clamp(p.x0, (p.x1 - pet_w).max(p.x0))))
 }
 
+/// 画面ごとに、作業に使っているか(設計書の10節)。前面のウィンドウがある、作業アプリのウィンドウがある、
+/// 最近カーソルが入った(`recent_cursor` の番号)のどれかなら使っている。ほかのアプリの窓があるだけなら使っていない
+pub fn used_screens(
+    screens: &[ScreenArea],
+    windows: &[WinInfo],
+    is_work: impl Fn(&WinInfo) -> bool,
+    recent_cursor: &[usize],
+) -> Vec<bool> {
+    let overlaps = |a: &Rect, b: &Rect| a.x < b.right() && b.x < a.right() && a.y < b.bottom() && b.y < a.bottom();
+    screens
+        .iter()
+        .enumerate()
+        .map(|(i, s)| recent_cursor.contains(&i) || windows.iter().any(|w| (w.focused || is_work(w)) && overlaps(&w.rect, &s.full)))
+        .collect()
+}
+
+/// 作業中のモードに入ったときに向かう足場と、着いたときの絵の左上のx(設計書の10節)。
+/// いまいる画面か、ほかの使っていない画面の床。無ければいまいる画面の床。前面のウィンドウから遠いほうの端へ
+pub fn retreat_target(
+    screens: &[ScreenArea],
+    windows: &[WinInfo],
+    platforms: &[Platform],
+    pet_w: f64,
+    margin: f64,
+    used: &[bool],
+    here: usize,
+) -> Option<(Platform, f64)> {
+    let unused = |i: &usize| !used.get(*i).copied().unwrap_or(true);
+    let screen = Some(here).filter(unused).or_else(|| (0..screens.len()).find(unused)).unwrap_or(here);
+    let floor = *platforms.iter().find(|p| p.owner == Owner::Floor { screen })?;
+    let (lo, hi) = (floor.x0 + margin, (floor.x1 - pet_w - margin).max(floor.x0 + margin));
+    let far_left = windows.iter().find(|w| w.focused).is_some_and(|w| w.rect.x + w.rect.w / 2.0 >= (floor.x0 + floor.x1) / 2.0);
+    Some((floor, if far_left { lo } else { hi }))
+}
+
 /// 点を含む画面の番号(画面全体で見る)
 pub fn screen_index_at(screens: &[ScreenArea], x: f64, y: f64) -> Option<usize> {
     screens.iter().position(|s| s.full.contains(x, y))
@@ -231,6 +266,33 @@ mod tests {
 
     fn win(id: u64, x: f64, y: f64, w: f64, h: f64) -> WinInfo {
         WinInfo { id, app: format!("app{id}"), rect: Rect::new(x, y, w, h), focused: id == 1 }
+    }
+
+    #[test]
+    fn 使っている画面は_前面と作業アプリと最近のカーソル() {
+        let screens = [screen(0.0, 0.0, 1920.0, 1200.0), screen(-1080.0, -714.0, 1080.0, 1920.0)];
+        // 1は前面(正面の画面)、2はほかのアプリ(縦置きの画面)
+        let wins = [win(1, 100.0, 100.0, 800.0, 600.0), win(2, -900.0, 100.0, 500.0, 400.0)];
+        // ほかのアプリの窓があるだけなら、使っていない
+        assert_eq!(used_screens(&screens, &wins, |_| false, &[]), vec![true, false]);
+        assert_eq!(used_screens(&screens, &wins, |w| w.id == 2, &[]), vec![true, true]);
+        assert_eq!(used_screens(&screens, &wins, |_| false, &[1]), vec![true, true]);
+    }
+
+    #[test]
+    fn 作業中に向かう先は_使っていない画面の床で_前面から遠い端() {
+        let screens = [screen(0.0, 0.0, 1920.0, 1200.0), screen(-1080.0, -714.0, 1080.0, 1920.0)];
+        let wins = [win(1, 100.0, 100.0, 800.0, 600.0)];
+        let ps = platforms(&screens, &wins, PET, true);
+        let go = |used: &[bool], here| {
+            retreat_target(&screens, &wins, &ps, PET.0, 16.0, used, here).map(|(p, x)| (p.owner, x))
+        };
+        // 正面にいて縦置きが空いていれば、縦置きの床の左の端(前面は右にある)
+        assert_eq!(go(&[true, false], 0), Some((Owner::Floor { screen: 1 }, -1064.0)));
+        // 空いている画面にいれば、移らない
+        assert_eq!(go(&[true, false], 1), Some((Owner::Floor { screen: 1 }, -1064.0)));
+        // どちらも使っていれば、いまの画面の床の、前面から遠い端(前面は左寄りなので右の端)
+        assert_eq!(go(&[true, true], 0), Some((Owner::Floor { screen: 0 }, 1776.0)));
     }
 
     #[test]

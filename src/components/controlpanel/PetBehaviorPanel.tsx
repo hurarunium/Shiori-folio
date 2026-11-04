@@ -1,7 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../../api/tauri";
-import type { PetAction, PetAppPref, PetBehavior, PetBehaviorDto, PetLike, PetSeenApp } from "../../types";
+import type {
+  PetAction,
+  PetAppPref,
+  PetBehavior,
+  PetBehaviorDto,
+  PetLike,
+  PetMode,
+  PetModeValues,
+  PetSeenApp,
+} from "../../types";
 import { ToggleRow } from "./shared";
 
 // ペットの行動の設定(ペットの行動の設計書の6節、企画書のP-10・P-11)。行動アルゴリズムの形は固定で、
@@ -31,6 +40,11 @@ const PRESETS: { key: keyof PetBehaviorDto["presets"]; label: string }[] = [
   { key: "quiet", label: "静か" },
   { key: "normal", label: "普通" },
   { key: "play", label: "遊ぶ" },
+];
+
+const MODES: { key: PetMode; label: string }[] = [
+  { key: "normal", label: "普段" },
+  { key: "work", label: "作業中" },
 ];
 
 const OS_LABEL: Record<PetSeenApp["os"], string> = { mac: "Mac", win: "Windows" };
@@ -72,6 +86,8 @@ export function PetBehaviorPanel() {
   const [presets, setPresets] = useState<PetBehaviorDto["presets"] | null>(null);
   const [original, setOriginal] = useState<PetBehavior | null>(null);
   const [form, setForm] = useState<PetBehavior | null>(null);
+  // 活発さと行動の重みを、どちらのモードの分として見ているか
+  const [tab, setTab] = useState<PetMode>("normal");
   const [seen, setSeen] = useState<PetSeenApp[]>([]);
   const [newName, setNewName] = useState("");
   const [pick, setPick] = useState("");
@@ -127,9 +143,17 @@ export function PetBehaviorPanel() {
   const setApps = (apps: PetAppPref[]) => update({ ...form, apps });
   const setApp = (i: number, a: PetAppPref) => setApps(form.apps.map((x, j) => (j === i ? a : x)));
 
-  // ひな形は、活発さ・重み・邪魔しない条件を入れ替える(ウィンドウに乗るかと、アプリの好みはそのまま)
+  const values: PetModeValues = tab === "work" ? form.work : { activity: form.activity, weights: form.weights };
+  const setValues = (v: PetModeValues) => update(tab === "work" ? { ...form, work: v } : { ...form, ...v });
+
+  // ひな形は、見ているモードの活発さ・重みを入れ替える。普段のときは邪魔しない条件も入れ替える
+  // (邪魔しない条件はモードで分けない。ウィンドウに乗るかと、アプリの好みはそのまま)
   const applyPreset = (key: keyof PetBehaviorDto["presets"]) => {
     const p = presets[key];
+    if (tab === "work") {
+      setValues({ activity: p.activity, weights: p.weights });
+      return;
+    }
     update({
       ...form,
       activity: p.activity,
@@ -142,7 +166,7 @@ export function PetBehaviorPanel() {
   const addApp = (name: string) => {
     const n = name.trim();
     if (!n || registered.has(n.toLowerCase())) return;
-    setApps([...form.apps, { names: [n], like: "normal", favorite: null }]);
+    setApps([...form.apps, { names: [n], like: "normal", favorite: null, work: false }]);
   };
 
   const removeName = (i: number, name: string) => {
@@ -177,12 +201,32 @@ export function PetBehaviorPanel() {
           checked={form.enabled}
           onChange={(v) => update({ ...form, enabled: v })}
         />
+        <div className="control-panel__field-row">
+          <span className="control-panel__field-label">調整するモード</span>
+          <div className="control-panel__actions">
+            {MODES.map((m) => (
+              <button
+                key={m.key}
+                type="button"
+                className="control-panel__btn"
+                disabled={tab === m.key}
+                aria-pressed={tab === m.key}
+                onClick={() => setTab(m.key)}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <p className="control-panel__pet-note">
+          作業アプリが前面に来ると作業中のモードに入り、使っていない画面か端へ移ります。前面でなくなって5分で普段に戻ります。ペットの右クリックで固定もできます。
+        </p>
         <RangeRow
           label="活発さ(1: 静か 〜 5: 活発)"
-          value={form.activity}
+          value={values.activity}
           min={1}
           max={5}
-          onChange={(v) => update({ ...form, activity: v })}
+          onChange={(v) => setValues({ ...values, activity: v })}
         />
         <div className="control-panel__field-row">
           <span className="control-panel__field-label">ひな形から始める</span>
@@ -202,10 +246,10 @@ export function PetBehaviorPanel() {
           <RangeRow
             key={a.key}
             label={a.label}
-            value={form.weights[a.key]}
+            value={values.weights[a.key]}
             min={0}
             max={10}
-            onChange={(v) => update({ ...form, weights: { ...form.weights, [a.key]: v } })}
+            onChange={(v) => setValues({ ...values, weights: { ...values.weights, [a.key]: v } })}
           />
         ))}
       </div>
@@ -288,6 +332,11 @@ export function PetBehaviorPanel() {
                 消す
               </button>
             </div>
+            <ToggleRow
+              label="作業アプリ(前面に来ると作業中のモードに入る)"
+              checked={a.work}
+              onChange={(v) => setApp(i, { ...a, work: v })}
+            />
           </div>
         ))}
         <div className="control-panel__field-row">
