@@ -65,6 +65,12 @@ fn yes() -> bool {
     true
 }
 
+/// 絵のファイル名として使えるか。拡張機能の名前の決まりに加えて、`jump_on.png` のような下線を許す
+/// (`/` や `..` は通さない)。
+fn is_valid_file(file: &str) -> bool {
+    crate::hub::manifest::is_valid_name(&file.trim_end_matches(".png").replace('_', "-"))
+}
+
 /// 画面へ渡す、動きの一覧(絵そのものは専用のURLの仕組みで渡す)。
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -140,7 +146,7 @@ impl Sprites {
         }
         let mut anims = BTreeMap::new();
         for (name, a) in file.animations {
-            if a.frames == 0 || !crate::hub::manifest::is_valid_name(a.file.trim_end_matches(".png")) {
+            if a.frames == 0 || !is_valid_file(&a.file) {
                 return Err(format!("{name}: fileかframesが正しくない"));
             }
             let bytes = read(&a.file).ok_or_else(|| format!("{name}: {}が無い", a.file))?;
@@ -225,6 +231,15 @@ mod tests {
             _ => None,
         });
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn 絵のファイル名は下線を許し_パスは断る() {
+        assert!(is_valid_file("jump_off.png"));
+        assert!(is_valid_file("idle.png"));
+        for bad in ["../idle.png", "a/b.png", "a\\b.png", "_a.png", "Idle.png", ".png"] {
+            assert!(!is_valid_file(bad), "{bad}");
+        }
     }
 
     #[test]
