@@ -12,6 +12,7 @@
 
 use crate::hub::{self, Status};
 use crate::shared_daemon;
+use crate::tasks;
 use chrono::Local;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -329,6 +330,7 @@ fn to_check(out: &mut Out, root: &Path) {
             out.sub(format!("ほか{}件", problems.len() - ARTICLE_LINES));
         }
     }
+    task_files(out, root);
     let warnings = crate::rag_vectordb_dir(root).join(".extract_warnings.json");
     if let Some(n) = std::fs::read_to_string(warnings)
         .ok()
@@ -337,6 +339,34 @@ fn to_check(out: &mut Out, root: &Path) {
         .filter(|n| *n > 0)
     {
         out.item(Mark::Note, format!("素材の抽出の警告: {n}件(索引の .extract_warnings.json)"));
+    }
+}
+
+/// タスク(`tasks/`、詩織Ver6.2)が読めるか、件数、崩れたmd。概要と詳細は入れず、idだけを出す。
+fn task_files(out: &mut Out, root: &Path) {
+    let dir = root.join("tasks");
+    if !dir.exists() {
+        out.item(Mark::Note, "タスクのフォルダ(tasks/)はまだ無い(初めてならふつう)");
+        return;
+    }
+    if let Err(e) = std::fs::read_dir(&dir) {
+        out.item(Mark::Ng, format!("タスクのフォルダを読めない: {} ({e})", rel(root, &dir)));
+        return;
+    }
+    let active = tasks::list(&dir, false);
+    let archived = tasks::list(&dir, true);
+    let counts = format!("未完了{}件・アーカイブ{}件", active.len(), archived.len());
+    let broken: Vec<&tasks::Task> = active.iter().chain(&archived).filter(|t| t.broken).collect();
+    if broken.is_empty() {
+        out.item(Mark::Ok, format!("タスク: {counts}(形の崩れたmdは無い)"));
+        return;
+    }
+    out.item(Mark::Note, format!("タスク: {counts}のうち{}件のmdの形が崩れている", broken.len()));
+    for task in broken.iter().take(ARTICLE_LINES) {
+        out.sub(if task.archived { format!("{}(アーカイブ)", task.id) } else { task.id.clone() });
+    }
+    if broken.len() > ARTICLE_LINES {
+        out.sub(format!("ほか{}件", broken.len() - ARTICLE_LINES));
     }
 }
 
@@ -517,6 +547,33 @@ mod tests {
         let files = md_files(&dir).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(files.len(), 1, "いちばん上の_systemだけを除く");
+    }
+
+    #[test]
+    fn タスクの件数と崩れたmdを報告し_本文は入れない() {
+        let dir = std::env::temp_dir().join(format!("shiori-diagnose-tasks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = || {
+            let mut out = Out { text: String::new(), ng: 0 };
+            task_files(&mut out, &dir);
+            out.text
+        };
+        assert!(run().contains("まだ無い"));
+
+        let tasks_dir = dir.join("tasks");
+        let done = tasks::add(&tasks_dir, &tasks::NewTask { summary: "秘密の概要", ..Default::default() }).unwrap();
+        tasks::add(&tasks_dir, &tasks::NewTask { summary: "秘密の概要", detail: "秘密の詳細", ..Default::default() }).unwrap();
+        tasks::complete(&tasks_dir, &done.id).unwrap();
+        let text = run();
+        assert!(text.contains("[OK] タスク: 未完了1件・アーカイブ1件"), "{text}");
+
+        std::fs::write(tasks_dir.join("broken.md"), "秘密の本文").unwrap();
+        let text = run();
+        assert!(text.contains("[--] タスク: 未完了2件・アーカイブ1件のうち1件"), "{text}");
+        assert!(text.contains("broken"), "{text}");
+        assert!(!text.contains("秘密"), "概要と本文は入れない: {text}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
