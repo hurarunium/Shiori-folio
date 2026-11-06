@@ -28,6 +28,8 @@ pub enum LogKind {
     Mcp,
     /// `shiori-save`。1日に1つ(`save-20261023.log`)
     Save,
+    /// `shiori-task`。1日に1つ(`task-20261106.log`)
+    Task,
 }
 
 impl LogKind {
@@ -36,11 +38,12 @@ impl LogKind {
             LogKind::App => "shiori-",
             LogKind::Mcp => "mcp-",
             LogKind::Save => "save-",
+            LogKind::Task => "task-",
         }
     }
 
     fn per_run(self) -> bool {
-        !matches!(self, LogKind::Save)
+        !matches!(self, LogKind::Save | LogKind::Task)
     }
 
     /// 標準エラーにも写すか。本体だけ写す(開発中に端末で読めるように)。
@@ -264,7 +267,7 @@ fn parse_log_name(name: &str) -> Option<LogKind> {
     if name.starts_with("._") || !name.ends_with(".log") {
         return None;
     }
-    [LogKind::App, LogKind::Mcp, LogKind::Save].into_iter().find(|k| {
+    [LogKind::App, LogKind::Mcp, LogKind::Save, LogKind::Task].into_iter().find(|k| {
         name.strip_prefix(k.prefix())
             .map(|rest| rest.as_bytes().first().is_some_and(u8::is_ascii_digit))
             .unwrap_or(false)
@@ -378,6 +381,7 @@ mod tests {
         assert_eq!(file_name(LogKind::App, t), "shiori-20261023-140512.log");
         assert_eq!(file_name(LogKind::Mcp, t), "mcp-20261023-140512.log");
         assert_eq!(file_name(LogKind::Save, t), "save-20261023.log");
+        assert_eq!(file_name(LogKind::Task, t), "task-20261023.log");
     }
 
     #[test]
@@ -385,6 +389,7 @@ mod tests {
         assert_eq!(parse_log_name("shiori-20261023-140512.log"), Some(LogKind::App));
         assert_eq!(parse_log_name("mcp-20261023-140512-2.log"), Some(LogKind::Mcp));
         assert_eq!(parse_log_name("save-20261023.log"), Some(LogKind::Save));
+        assert_eq!(parse_log_name("task-20261023.log"), Some(LogKind::Task));
         // Ver4.0の日ごとのファイルもshiori-の形なので、同じ種類として古い順に消える
         assert_eq!(parse_log_name("shiori-20261007.log"), Some(LogKind::App));
         assert_eq!(parse_log_name("._shiori-20261023-140512.log"), None);

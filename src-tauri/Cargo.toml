@@ -53,6 +53,8 @@ serde_yaml = "0.9"
 png = "0.17"
 # 素材の取り込み(詩織Ver3.5)でコピー前後の一致をSHA-256で照合する。
 sha2 = "0.10"
+# タスクのフォルダ名の比較(exfatはMacでNFD、WindowsでNFCを返す)。RAGと同じ版。
+unicode-normalization = "0.1.26"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

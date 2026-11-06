@@ -26,6 +26,7 @@ mod source_path;
 mod shelf;
 mod system_docs;
 mod system_info;
+pub mod tasks;
 mod text_transform;
 mod whisper_client;
 
@@ -501,6 +502,16 @@ pub fn shelf_root() -> PathBuf {
     root.parent()
         .expect("system/ should have a parent directory")
         .join("knowledge")
+}
+
+/// タスク(tasks/、詩織Ver6.2)の場所。libraryの隣に置く。棚と違い、初めは`tasks/`がまだ無いので、
+/// `tasks/`の有無で判定すると、実機で親のフォルダ(`E:\tasks`)を指してしまう。
+pub fn tasks_root() -> PathBuf {
+    let library = library_root();
+    library
+        .parent()
+        .expect("library/ should have a parent directory")
+        .join("tasks")
 }
 
 pub(crate) fn load_config(root: &Path) -> Result<AppConfig, String> {
