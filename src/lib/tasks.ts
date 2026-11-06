@@ -28,6 +28,14 @@ export function dueState(due: string | null, now: Date = new Date()): DueState {
   return due <= dateString(limit) ? "near" : "none";
 }
 
+// ホームの札に出すタスク(超過と7日以内)を、締切の近い順で返す。
+export function dueSoonTasks(tasks: Task[], now: Date = new Date()): Task[] {
+  return sortTasks(
+    tasks.filter((t) => dueState(t.due, now) !== "none"),
+    "due",
+  );
+}
+
 // 親のフォルダを選ぶと、その中のフォルダのタスクも出す。
 export function inFolder(task: Task, folder: string): boolean {
   return task.folder === folder || task.folder.startsWith(`${folder}/`);

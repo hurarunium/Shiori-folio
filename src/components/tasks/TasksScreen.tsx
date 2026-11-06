@@ -55,6 +55,17 @@ function TasksScreen() {
     if (isActive) reload();
   }, [isActive, reload]);
 
+  // ホームの札から渡されたタスクを、隠れないように絞り込みを外して選ぶ。編集中の欄は閉じない。
+  const taskToOpen = useMainViewStore((s) => s.taskToOpen);
+  const clearTaskToOpen = useMainViewStore((s) => s.clearTaskToOpen);
+  useEffect(() => {
+    if (!taskToOpen) return;
+    setFilter({ kind: "all" });
+    setQuery("");
+    setSelectedId(taskToOpen);
+    clearTaskToOpen();
+  }, [taskToOpen, clearTaskToOpen]);
+
   // 書き込みのあとは、失敗しても読み直す(ほかで変わっていることがあるため)。成功した結果を返す。
   const write = async <T,>(action: () => Promise<T>): Promise<T | null> => {
     setBusy(true);

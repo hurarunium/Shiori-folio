@@ -31,6 +31,10 @@ interface MainViewStore {
   libraryQuery: string | null;
   searchInLibrary: (query: string) => void;
   clearLibraryQuery: () => void;
+  // ホームの札からタスクの画面へ渡すタスクのid。タスクの画面が受け取ったらnullに戻す。
+  taskToOpen: string | null;
+  openTask: (id: string) => void;
+  clearTaskToOpen: () => void;
 }
 
 // 画面の移動をログに残す。記録に失敗しても、画面の切り替えは止めない。
@@ -68,4 +72,10 @@ export const useMainViewStore = create<MainViewStore>((set, get) => ({
     set({ active: "library", libraryQuery: query });
   },
   clearLibraryQuery: () => set({ libraryQuery: null }),
+  taskToOpen: null,
+  openTask: (id) => {
+    logMove(get().active, "tasks");
+    set({ active: "tasks", taskToOpen: id });
+  },
+  clearTaskToOpen: () => set({ taskToOpen: null }),
 }));

@@ -287,11 +287,24 @@
   grid-template-columns: 1fr;
 }
 
+/* 左の列。締切の札を上に、伝言メモを下に積む。高さが足りなければ、札を残して伝言メモを縮める */
+.home-screen__notes {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow: hidden;
+  /* 傾けた紙の角が、overflowで切れないように */
+  padding: 4px;
+  margin: -4px;
+}
+
 /* 伝言メモ(申し送り)。留め具で留めた、少し傾いた紙 */
 .home-screen__memo {
-  align-self: start;
+  flex: 0 1 auto;
+  min-height: 0;
   position: relative;
-  max-height: 100%;
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -358,6 +371,81 @@
   font-size: var(--fs-xs);
   letter-spacing: 0.05em;
   color: var(--moss-deep);
+}
+
+/* 締切の札。紙は伝言メモと同じで、反対へ少し傾ける。見出しと各行がボタンなので、札そのものは押せない。
+   紙の上ではタスクの画面の色(--danger、--lamp)が薄いので、札の中だけ濃い色にする */
+.home-screen__due,
+.home-screen__due:hover {
+  flex-shrink: 0;
+  gap: 3px;
+  transform: rotate(0.9deg);
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.4);
+  cursor: default;
+}
+
+.home-screen__due-head {
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.home-screen__due-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 1px 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.home-screen__due-line span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.home-screen__due-line em {
+  flex-shrink: 0;
+  font-style: normal;
+  font-size: var(--fs-xs);
+  font-weight: 500;
+}
+
+.home-screen__due-date--overdue {
+  color: #a23b2e;
+}
+
+.home-screen__due-date--near {
+  color: #8a5a1e;
+}
+
+.home-screen__due-head:hover,
+.home-screen__due-line:hover,
+.home-screen__due-more:hover {
+  text-decoration: underline;
+}
+
+.home-screen__due-more {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--slip-ink-dim);
+  font: inherit;
+  font-size: var(--fs-xs);
+  text-align: left;
+  cursor: pointer;
 }
 
 /* 新着の棚(最近更新された記録) */
@@ -496,6 +584,21 @@ button.home-screen__status-item:hover {
 
   .home-screen__memo:hover {
     transform: translateY(-1px);
+  }
+
+  .home-screen__due,
+  .home-screen__due:hover {
+    transform: none;
+  }
+
+  /* 新着の棚と縦に積むので、札と伝言メモは横に並べて高さを抑える */
+  .home-screen__notes {
+    flex-direction: row;
+  }
+
+  .home-screen__notes > * {
+    flex: 1 1 0;
+    min-width: 0;
   }
 }
 

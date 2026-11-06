@@ -2,9 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { api, type ServiceStatus } from "../../api/tauri";
 import ArticleDetail from "../library/ArticleDetail";
 import { getCategoryMeta, stripSourceExtension } from "../../lib/library";
+import { dueSoonTasks } from "../../lib/tasks";
 import { useMainViewStore } from "../../store/useMainViewStore";
 import { useShioriStore } from "../../store/useShioriStore";
-import type { Handoff, LibraryFile, PendingItems } from "../../types";
+import type { Handoff, LibraryFile, PendingItems, Task } from "../../types";
+import DueSlip from "./DueSlip";
 import ReceptionShiori from "./ReceptionShiori";
 import "./HomeScreen.css";
 
@@ -69,11 +71,13 @@ function HomeScreen({ pending, onOpenPending }: Props) {
   const active = useMainViewStore((s) => s.active === "home");
   const searchInLibrary = useMainViewStore((s) => s.searchInLibrary);
   const setActiveView = useMainViewStore((s) => s.setActive);
+  const openTask = useMainViewStore((s) => s.openTask);
   const serviceStatuses = useShioriStore((s) => s.serviceStatuses);
 
   const [query, setQuery] = useState("");
   const [recent, setRecent] = useState<LibraryFile[] | null>(null);
   const [handoff, setHandoff] = useState<Handoff | null | undefined>(undefined);
+  const [tasks, setTasks] = useState<Task[]>([]);
   const [claudeSessions, setClaudeSessions] = useState<number | null>(null);
   const [todayTokens, setTodayTokens] = useState<number | null>(null);
   const [freeGb, setFreeGb] = useState<number | null>(null);
@@ -100,6 +104,11 @@ function HomeScreen({ pending, onOpenPending }: Props) {
       .then(() => api.getLatestHandoff())
       .then(ifCurrent(setHandoff))
       .catch(ifCurrent(() => setHandoff(null)));
+    // タスクはファイルを直接読むので、RAGを待たない。
+    api
+      .listTasks(false)
+      .then(ifCurrent(setTasks))
+      .catch(() => undefined);
     api
       .listClaudeSessions()
       .then(ifCurrent((s) => setClaudeSessions(s.filter((x) => x.state !== "ended" && x.state !== "stale").length)))
@@ -145,6 +154,7 @@ function HomeScreen({ pending, onOpenPending }: Props) {
   const llm = serviceStatuses["llm"];
   const conversationOn = !!llm && !llm.skipped;
   const sign = signOf(serviceStatuses["embedding"], serviceStatuses["rag"], llm);
+  const dueSoon = dueSoonTasks(tasks, now);
   const pendingTotal = pending
     ? pending.tags.filter((t) => t.status === "pending").length +
       pending.projects.filter((p) => p.status === "pending").length +
@@ -200,41 +210,50 @@ function HomeScreen({ pending, onOpenPending }: Props) {
         </div>
       </div>
 
-      <div className={`home-screen__front${handoff ? "" : " home-screen__front--no-memo"}`}>
-        {handoff && (
-          <button
-            type="button"
-            className="home-screen__memo"
-            onClick={() => setOpened({ source: handoff.source, sourceCategory: handoff.sourceCategory, assetPath: "" })}
-            title={handoff.title}
-          >
-            <span className="home-screen__memo-head">
-              伝言メモ
-              <small>
-                {[handoff.project, handoff.fromMemory ? shortDate(handoff.date) : handoff.date]
-                  .filter(Boolean)
-                  .join(" · ")}
-              </small>
-            </span>
-            {handoff.fromMemory ? (
-              <>
-                {handoff.todos.slice(0, HANDOFF_TODOS_MAX).map((todo) => (
-                  <span key={`t-${todo}`} className="home-screen__memo-line">
-                    <em>やること</em>
-                    {todo}
-                  </span>
-                ))}
-                {handoff.notes.slice(0, HANDOFF_NOTES_MAX).map((note) => (
-                  <span key={`n-${note}`} className="home-screen__memo-line">
-                    <em>申し送り</em>
-                    {note}
-                  </span>
-                ))}
-              </>
-            ) : (
-              <span className="home-screen__memo-line">{handoff.items.join(" / ")}</span>
+      <div className={`home-screen__front${handoff || dueSoon.length > 0 ? "" : " home-screen__front--no-memo"}`}>
+        {(handoff || dueSoon.length > 0) && (
+          <div className="home-screen__notes">
+            {dueSoon.length > 0 && (
+              <DueSlip tasks={dueSoon} now={now} onOpenList={() => setActiveView("tasks")} onOpenTask={openTask} />
             )}
-          </button>
+            {handoff && (
+              <button
+                type="button"
+                className="home-screen__memo"
+                onClick={() =>
+                  setOpened({ source: handoff.source, sourceCategory: handoff.sourceCategory, assetPath: "" })
+                }
+                title={handoff.title}
+              >
+                <span className="home-screen__memo-head">
+                  伝言メモ
+                  <small>
+                    {[handoff.project, handoff.fromMemory ? shortDate(handoff.date) : handoff.date]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </small>
+                </span>
+                {handoff.fromMemory ? (
+                  <>
+                    {handoff.todos.slice(0, HANDOFF_TODOS_MAX).map((todo) => (
+                      <span key={`t-${todo}`} className="home-screen__memo-line">
+                        <em>やること</em>
+                        {todo}
+                      </span>
+                    ))}
+                    {handoff.notes.slice(0, HANDOFF_NOTES_MAX).map((note) => (
+                      <span key={`n-${note}`} className="home-screen__memo-line">
+                        <em>申し送り</em>
+                        {note}
+                      </span>
+                    ))}
+                  </>
+                ) : (
+                  <span className="home-screen__memo-line">{handoff.items.join(" / ")}</span>
+                )}
+              </button>
+            )}
+          </div>
         )}
 
         <section className="home-screen__shelf">
