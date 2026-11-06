@@ -1,0 +1,469 @@
+/* タスクの画面(詩織Ver6.2)。左にフォルダ、中央に一覧、右に詳細の3列。
+   自前でスクロールを管理する(MainAreaのselfScroll)。見た目は知識の棚の画面に合わせている。 */
+.tasks-screen {
+  display: grid;
+  /* 窓の既定は800×600で、列と小道具の枠にも幅を取られる。狭くても3列が収まる最小幅にする */
+  grid-template-columns: minmax(120px, 200px) minmax(180px, 1fr) minmax(180px, 1fr);
+  gap: 14px;
+  height: 100%;
+  min-height: 0;
+  overflow-x: auto;
+  padding: 0 14px 14px;
+  font-family: var(--font-body);
+  color-scheme: dark;
+}
+
+.tasks-input {
+  padding: 4px 8px;
+  background: none;
+  border: 0.5px solid var(--glass-border);
+  border-radius: 6px;
+  color: var(--paper);
+  font-family: var(--font-body);
+  font-size: var(--fs-sm);
+  min-width: 0;
+}
+
+/* 開いた選択肢の背景は、WindowsのWebView2では親から受け継がないので、色を決めておく */
+.tasks-input option {
+  background: var(--bg-deep);
+  color: var(--paper);
+}
+
+.tasks-button {
+  padding: 4px 12px;
+  background: none;
+  border: 0.5px solid var(--glass-border);
+  border-radius: 6px;
+  color: var(--paper-dim);
+  font-family: var(--font-body);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.tasks-button:hover:not(:disabled) {
+  background: rgba(143, 160, 107, 0.08);
+  color: var(--paper);
+}
+
+.tasks-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.tasks-button--primary {
+  border-color: var(--moss-deep);
+  color: var(--moss);
+}
+
+.tasks-button--danger {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.tasks-button--danger:hover:not(:disabled) {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.tasks-dim {
+  color: var(--paper-dim);
+  font-size: var(--fs-md);
+}
+
+.tasks-error {
+  color: var(--danger);
+  font-size: var(--fs-sm);
+  margin: 6px 0;
+  word-break: break-all;
+}
+
+/* 左の列 */
+.tasks-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  overflow-y: auto;
+  min-height: 0;
+  border-right: 0.5px solid var(--glass-border);
+  padding-right: 10px;
+}
+
+.tasks-nav__item {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  color: var(--paper);
+  font-family: var(--font-body);
+  font-size: var(--fs-md);
+  text-align: left;
+  cursor: pointer;
+}
+
+.tasks-nav__item:hover {
+  background: rgba(143, 160, 107, 0.08);
+}
+
+.tasks-nav__item--active {
+  background: rgba(143, 160, 107, 0.16);
+}
+
+.tasks-nav__item--nested {
+  padding-left: 22px;
+}
+
+.tasks-nav__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tasks-nav__count {
+  color: var(--paper-dim);
+  font-size: var(--fs-xs);
+  flex-shrink: 0;
+}
+
+.tasks-nav__add {
+  margin-top: 6px;
+  padding: 5px 8px;
+  background: none;
+  border: none;
+  color: var(--paper-dim);
+  font-family: var(--font-body);
+  font-size: var(--fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.tasks-nav__add:hover {
+  color: var(--paper);
+}
+
+.tasks-nav__form {
+  display: flex;
+  padding: 2px 0;
+}
+
+.tasks-nav__form .tasks-input {
+  width: 100%;
+}
+
+.tasks-nav__bottom {
+  margin-top: auto;
+  padding-top: 8px;
+}
+
+.tasks-nav__menu {
+  position: fixed;
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  min-width: 130px;
+  padding: 4px;
+  background: var(--bg-deep);
+  border: 1px solid var(--glass-border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.tasks-nav__menu button {
+  padding: 5px 10px;
+  background: none;
+  border: none;
+  border-radius: 5px;
+  color: var(--paper);
+  font-family: var(--font-body);
+  font-size: var(--fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.tasks-nav__menu button:hover {
+  background: rgba(143, 160, 107, 0.16);
+}
+
+/* 中央の列。幅が足りないときは、行の右端の作成日を、フォルダや締切の段へ移す */
+.tasks-list {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  container-type: inline-size;
+}
+
+.tasks-list__tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex-shrink: 0;
+  margin-bottom: 8px;
+}
+
+.tasks-list__search {
+  flex: 1 1 110px;
+}
+
+.tasks-list__scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.tasks-list__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 6px 8px;
+}
+
+.tasks-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 8px;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  color: var(--paper);
+  font-family: var(--font-body);
+  text-align: left;
+  cursor: pointer;
+}
+
+.tasks-row:hover:not(:disabled) {
+  background: rgba(143, 160, 107, 0.08);
+}
+
+.tasks-row:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.tasks-row--active {
+  background: rgba(143, 160, 107, 0.16);
+}
+
+.tasks-row__main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.tasks-row__summary {
+  font-size: var(--fs-md);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.tasks-row__broken {
+  margin-right: 6px;
+  color: var(--danger);
+  font-size: var(--fs-xs);
+}
+
+.tasks-row__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  color: var(--paper-dim);
+  font-size: var(--fs-xs);
+}
+
+.tasks-row__due--overdue {
+  color: var(--danger);
+}
+
+.tasks-row__due--near {
+  color: var(--lamp);
+}
+
+.tasks-row__created {
+  flex-shrink: 0;
+  color: var(--paper-dim);
+  font-size: var(--fs-xs);
+  line-height: 1.7;
+}
+
+.tasks-row__created-inline {
+  display: none;
+}
+
+@container (max-width: 340px) {
+  .tasks-row__created {
+    display: none;
+  }
+
+  .tasks-row__created-inline {
+    display: inline;
+  }
+}
+
+/* 右の列 */
+.tasks-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border-left: 0.5px solid var(--glass-border);
+  padding-left: 14px;
+}
+
+.tasks-detail {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.tasks-detail__header {
+  flex-shrink: 0;
+  padding: 2px 0 10px;
+}
+
+.tasks-detail__title {
+  margin: 0 0 4px;
+  color: var(--paper);
+  font-family: var(--font-display);
+  font-size: var(--fs-xl);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.tasks-detail__meta {
+  margin: 0 0 8px;
+  color: var(--paper-dim);
+  font-size: var(--fs-sm);
+  word-break: break-all;
+}
+
+.tasks-detail__scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.tasks-detail__raw {
+  margin: 0;
+  color: var(--paper-dim);
+  font-size: var(--fs-sm);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 記事詳細の本文(article-detail__body)には表・コードの装飾が無いため、この画面の中だけで足す。 */
+.tasks-screen .article-detail__body pre {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--glass-border);
+  border-radius: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.tasks-screen .article-detail__body code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.92em;
+  background: rgba(143, 160, 107, 0.12);
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+
+.tasks-screen .article-detail__body pre code {
+  background: none;
+  padding: 0;
+  font-size: inherit;
+}
+
+.tasks-screen .article-detail__body table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 12px 0;
+  font-size: var(--fs-md);
+  line-height: 1.5;
+}
+
+.tasks-screen .article-detail__body th,
+.tasks-screen .article-detail__body td {
+  border: 1px solid var(--glass-border);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.tasks-screen .article-detail__body th {
+  background: rgba(143, 160, 107, 0.1);
+}
+
+/* 追加と編集の欄 */
+.tasks-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.tasks-form__field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  color: var(--paper-dim);
+  font-size: var(--fs-sm);
+}
+
+.tasks-form__field--grow {
+  flex: 1 1 auto;
+  min-height: 120px;
+}
+
+.tasks-form__due {
+  display: flex;
+  gap: 6px;
+}
+
+.tasks-form__detail {
+  flex: 1 1 auto;
+  resize: none;
+  line-height: 1.6;
+}
+
+.tasks-form__actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* 削除の確認(枠はPendingModalを借りる) */
+.tasks-confirm {
+  width: min(440px, 90vw);
+}
+
+.tasks-confirm__body {
+  padding: 14px 22px 4px;
+}
+
+.tasks-confirm__summary {
+  margin: 0 0 8px;
+  color: var(--paper);
+  font-size: var(--fs-base);
+  overflow-wrap: anywhere;
+}
+
+.tasks-confirm__actions {
+  justify-content: flex-end;
+  padding: 10px 22px 18px;
+}

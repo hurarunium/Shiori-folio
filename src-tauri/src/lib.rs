@@ -2374,6 +2374,77 @@ async fn read_system_doc(id: String) -> Result<String, String> {
     run_blocking(move || system_docs::read(&library_root(), &project_root(), &id)).await
 }
 
+// タスクの画面(詩織Ver6.2)向け。読み書きはtasks.rsに集め、CLI(shiori-task)と同じ関数を呼ぶ。
+#[tauri::command]
+async fn list_tasks(archived: bool) -> Result<Vec<tasks::Task>, String> {
+    run_blocking(move || Ok(tasks::list(&tasks_root(), archived))).await
+}
+
+#[tauri::command]
+async fn list_task_folders() -> Result<Vec<String>, String> {
+    run_blocking(move || Ok(tasks::folders(&tasks_root()))).await
+}
+
+#[tauri::command]
+async fn add_task(summary: String, folder: String, due: Option<String>, detail: String) -> Result<tasks::Task, String> {
+    run_blocking(move || {
+        tasks::add(
+            &tasks_root(),
+            &tasks::NewTask { summary: &summary, folder: &folder, due: due.as_deref(), detail: &detail },
+        )
+    })
+    .await
+}
+
+// 編集の欄の中身をまとめて保存する。`expected_mtime`は編集を始めたときのmtimeで、変わっていれば保存しない。
+#[tauri::command]
+async fn save_task(
+    id: String,
+    summary: String,
+    folder: String,
+    due: Option<String>,
+    detail: String,
+    expected_mtime: f64,
+) -> Result<tasks::Task, String> {
+    run_blocking(move || {
+        let root = tasks_root();
+        let change = tasks::TaskEdit { summary: Some(&summary), due: Some(due.as_deref()), detail: Some(&detail) };
+        tasks::edit(&root, &id, &change, Some(expected_mtime))?;
+        tasks::move_to(&root, &id, &folder)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn complete_task(id: String) -> Result<tasks::Task, String> {
+    run_blocking(move || tasks::complete(&tasks_root(), &id)).await
+}
+
+#[tauri::command]
+async fn restore_task(id: String) -> Result<tasks::Task, String> {
+    run_blocking(move || tasks::restore(&tasks_root(), &id)).await
+}
+
+#[tauri::command]
+async fn delete_task(id: String) -> Result<(), String> {
+    run_blocking(move || tasks::delete(&tasks_root(), &id)).await
+}
+
+#[tauri::command]
+async fn add_task_folder(folder: String) -> Result<String, String> {
+    run_blocking(move || tasks::folder_add(&tasks_root(), &folder)).await
+}
+
+#[tauri::command]
+async fn rename_task_folder(from: String, to: String) -> Result<String, String> {
+    run_blocking(move || tasks::folder_rename(&tasks_root(), &from, &to)).await
+}
+
+#[tauri::command]
+async fn remove_task_folder(folder: String) -> Result<(), String> {
+    run_blocking(move || tasks::folder_remove(&tasks_root(), &folder)).await
+}
+
 // 知識の棚タブ(Ver5.0候補)向け。一覧と本文は`knowledge/`を直接読み(shelf.rs参照)、
 // 検索だけRAGの`/search_shelf`を使う。
 #[tauri::command]
@@ -5614,6 +5685,12 @@ pub fn run() {
     shiori_log::info("APP", "起動した", &[("版", &env!("CARGO_PKG_VERSION")), ("場所", &root.display())]);
     // 起動時の自動修復(詩織Ver6.0の段階6)。設定とハブを読む前に、詩織が作ったものを直す
     repair::run_at_startup(&root, before);
+    // AIが読むINDEX.mdを書き直す(手で直したmdを反映するため)。SSDの読み書きで起動を待たせない
+    std::thread::spawn(|| {
+        if let Err(e) = tasks::write_index(&tasks_root()) {
+            shiori_log::warn("TASK", "INDEX.mdを書けない", &[("理由", &e)]);
+        }
+    });
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -5718,6 +5795,16 @@ pub fn run() {
             reveal_library_asset,
             list_system_docs,
             read_system_doc,
+            list_tasks,
+            list_task_folders,
+            add_task,
+            save_task,
+            complete_task,
+            restore_task,
+            delete_task,
+            add_task_folder,
+            rename_task_folder,
+            remove_task_folder,
             list_shelf_docs,
             read_shelf_doc,
             search_shelf,

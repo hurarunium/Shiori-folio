@@ -32,6 +32,7 @@ function bundledIcon(id: string): string | null {
 const BUILTIN: { id: BuiltinView; label: string; group: SidebarGroup }[] = [
   { id: "home", label: "ホーム", group: "screen" },
   { id: "conversation", label: "会話", group: "screen" },
+  { id: "tasks", label: "タスク", group: "screen" },
   { id: "library", label: "図書館", group: "screen" },
   { id: "library-browse", label: "全件閲覧", group: "screen" },
   { id: "shelf", label: "知識の棚", group: "screen" },

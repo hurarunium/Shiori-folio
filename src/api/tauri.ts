@@ -35,6 +35,7 @@ import type {
   SourceFrontmatter,
   SystemDoc,
   SystemInfo,
+  Task,
   TtsFailure,
 } from "../types";
 
@@ -197,6 +198,25 @@ export const api = {
   listShelfDocs: () => invoke<ShelfDoc[]>("list_shelf_docs"),
   readShelfDoc: (name: string) => invoke<string>("read_shelf_doc", { name }),
   searchShelf: (query: string) => invoke<string[]>("search_shelf", { query }),
+  // タスクの画面(詩織Ver6.2)。読み書きはCLI(shiori-task)と同じ関数で行う。
+  listTasks: (archived: boolean) => invoke<Task[]>("list_tasks", { archived }),
+  listTaskFolders: () => invoke<string[]>("list_task_folders"),
+  addTask: (task: { summary: string; folder: string; due: string | null; detail: string }) =>
+    invoke<Task>("add_task", task),
+  saveTask: (task: {
+    id: string;
+    summary: string;
+    folder: string;
+    due: string | null;
+    detail: string;
+    expectedMtime: number;
+  }) => invoke<Task>("save_task", task),
+  completeTask: (id: string) => invoke<Task>("complete_task", { id }),
+  restoreTask: (id: string) => invoke<Task>("restore_task", { id }),
+  deleteTask: (id: string) => invoke<void>("delete_task", { id }),
+  addTaskFolder: (folder: string) => invoke<string>("add_task_folder", { folder }),
+  renameTaskFolder: (from: string, to: string) => invoke<string>("rename_task_folder", { from, to }),
+  removeTaskFolder: (folder: string) => invoke<void>("remove_task_folder", { folder }),
 
   // スタンドアロン図書館UI向け、検索を経由しない蔵書全件の一覧取得。
   // Phase 7(1冊=1ファイル表示単位への変更)により、ファイル単位に集約された

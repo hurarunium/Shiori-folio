@@ -1,4 +1,4 @@
-# 列のアイコン9枚(24×24)を点で描く(詩織Ver6.0、2026-11-02)。
+# 列のアイコン10枚(24×24)を点で描く(詩織Ver6.0、2026-11-02。タスクはVer6.2)。
 # 使い方: python make_icons.py <出力フォルダ>
 # 色はペットの絵(src/assets/pet/idle.png)の27色から選ぶ。外側の輪郭線は付けない。
 # 出力したPNGを、実機の data/ui/icons/ と src/assets/icons/ に置く。
@@ -41,6 +41,16 @@ i.rect(5,16,9,17,'L');i.rect(5,17,7,19,'L');i.px(5,19,'P');i.rect(8,16,9,16,'P')
 i.rect(6,7,16,7,'N');i.rect(6,10,13,10,'N');i.rect(6,12,10,12,'P')
 star5(i,19,4,'y')
 i.save('conversation')
+
+# tasks: 真鍮のクリップの紙と、苔色の印の並び(Ver6.2)
+i=Ic()
+i.rect(4,3,19,22,'B');i.rect(4,3,19,3,'Y');i.rect(4,3,4,22,'Y');i.rect(4,22,19,22,'D');i.rect(19,4,19,22,'D')
+i.rect(6,6,17,20,'W');i.rect(6,20,17,20,'S');i.rect(17,6,17,20,'S')
+i.rect(8,1,15,4,'P');i.rect(8,1,15,1,'L');i.rect(10,2,13,2,'N')
+for y in (9,13,17):
+    i.px(7,y,'g');i.px(8,y+1,'g');i.px(9,y,'g');i.px(10,y-1,'g')
+    i.rect(12,y,15,y,'N' if y<17 else 'P')
+i.save('tasks')
 
 # library: 緑の革表紙の本と金の星
 i=Ic()

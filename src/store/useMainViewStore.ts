@@ -5,6 +5,7 @@ import { api } from "../api/tauri";
 export type BuiltinView =
   | "home"
   | "conversation"
+  | "tasks"
   | "library"
   | "library-browse"
   | "shelf"

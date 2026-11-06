@@ -9,6 +9,7 @@ import LibraryBrowseScreen from "../library/LibraryBrowseScreen";
 import ControlPanel from "../controlpanel/ControlPanel";
 import RulesScreen from "../rules/RulesScreen";
 import ShelfScreen from "../shelf/ShelfScreen";
+import TasksScreen from "../tasks/TasksScreen";
 import ExtensionsScreen from "../extensions/ExtensionsScreen";
 import ExtensionFrame from "../extensions/ExtensionFrame";
 import ConversationScreen from "../conversation/ConversationScreen";
@@ -21,6 +22,7 @@ import "./MainArea.css";
 // selfScroll。それ以外は余白を付けて画面ごとスクロールさせる。
 const BUILTIN_CONTENT: Partial<Record<MainView, { content: () => ReactNode; selfScroll: boolean }>> = {
   conversation: { content: () => <ConversationScreen />, selfScroll: true },
+  tasks: { content: () => <TasksScreen />, selfScroll: true },
   library: { content: () => <LibraryScreen />, selfScroll: true },
   "library-browse": { content: () => <LibraryBrowseScreen />, selfScroll: true },
   shelf: { content: () => <ShelfScreen />, selfScroll: true },

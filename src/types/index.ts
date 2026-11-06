@@ -51,6 +51,21 @@ export interface ShelfDoc {
   mtime: number;
 }
 
+// タスクの画面(詩織Ver6.2)の1件。folderは"Unity/Tanker"の形で、未分類は空文字列。
+export interface Task {
+  id: string;
+  summary: string;
+  folder: string;
+  created: string;
+  due: string | null;
+  done: string | null;
+  detail: string;
+  mtime: number;
+  // frontmatterが崩れている印。概要にはファイル名、詳細にはファイルの中身がそのまま入る
+  broken: boolean;
+  archived: boolean;
+}
+
 // スタンドアロン図書館UI(Phase 7、1冊=1ファイルの表示単位)向け。チャンクの
 // 本文は含まず、ファイル内の見出し一覧だけを持つ。
 export interface LibraryFile {

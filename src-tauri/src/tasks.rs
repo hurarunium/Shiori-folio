@@ -25,6 +25,8 @@ const ARCHIVE_DIR: &str = "_archive";
 const INDEX_FILE: &str = "INDEX.md";
 const MAX_FOLDER_DEPTH: usize = 2;
 const DATE_FORMAT: &str = "%Y-%m-%d";
+// 画面を往復したmtimeの比較の幅。serde_jsonの既定の読み取りは小数の最後の桁がずれることがある。
+const MTIME_TOLERANCE_SECS: f64 = 0.001;
 // Windowsの予約名。拡張子が付いていても使えない。
 const RESERVED_NAMES: &[&str] = &[
     "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2",
@@ -453,7 +455,7 @@ pub fn edit(root: &Path, id: &str, change: &TaskEdit, expected_mtime: Option<f64
     if task.broken {
         return Err(format!("形が崩れているので変更できません。ファイルを直してください: {}", task.path.display()));
     }
-    if expected_mtime.is_some_and(|m| m != task.mtime) {
+    if expected_mtime.is_some_and(|m| (m - task.mtime).abs() > MTIME_TOLERANCE_SECS) {
         return Err("ほかで変更されました。読み直してください".to_string());
     }
     let summary = change.summary.map(require_summary).transpose()?;
@@ -753,7 +755,8 @@ mod tests {
         let change = TaskEdit { summary: Some("新"), ..Default::default() };
         assert!(edit(&root, &task.id, &change, Some(task.mtime + 10.0)).unwrap_err().contains("読み直して"));
         assert_eq!(list(&root, false)[0].summary, "元");
-        edit(&root, &task.id, &change, Some(task.mtime)).unwrap();
+        // JSONを往復した小さなずれは、かち合いと見なさない
+        edit(&root, &task.id, &change, Some(task.mtime + 1e-6)).unwrap();
         assert_eq!(list(&root, false)[0].summary, "新");
         std::fs::remove_dir_all(&root).unwrap();
     }
