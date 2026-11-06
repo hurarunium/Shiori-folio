@@ -1,6 +1,6 @@
 [package]
 name = "shiori-folio"
-version = "6.1.0"
+version = "6.2.0"
 description = "詩織（Shiori-folio）"
 authors = ["you"]
 edition = "2021"

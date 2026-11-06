@@ -31,7 +31,7 @@ export function SystemStatusPage({
   // Mac(Apple Silicon)にはdiscrete VRAMが存在しない(統合メモリ)ため、
   // VRAM・GPU温度ゲージ自体を表示せず、システムRAMのゲージに統合メモリである旨を添える。
   const isMac = info?.platform === "macos";
-  // tauri.conf.jsonのversion(詩織Ver4.0で4.0.0にそろえ、Ver4.0.1で4.0.1、Ver4.1で4.1.0、Ver4.2で4.2.0、Ver6.0で6.0.0、Ver6.0.1で6.0.1、Ver6.1で6.1.0に上げた)。
+  // tauri.conf.jsonのversion(詩織Ver4.0で4.0.0にそろえ、Ver4.0.1で4.0.1、Ver4.1で4.1.0、Ver4.2で4.2.0、Ver6.0で6.0.0、Ver6.0.1で6.0.1、Ver6.1で6.1.0、Ver6.2で6.2.0に上げた)。
   const [appVersion, setAppVersion] = useState<string | null>(null);
   useEffect(() => {
     getVersion()
