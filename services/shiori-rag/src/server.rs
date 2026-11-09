@@ -350,6 +350,10 @@ impl App {
                 Ok(ok(json!({"status": "ok", "chunks": n})))
             }
             Err(ReindexError::NotFound) => Ok(ok(json!({"status": "not_found", "chunks": 0}))),
+            Err(ReindexError::Rejected) => {
+                log::warn(errors::RAG_012.code, "索引の場所の外か対象外のファイルなので断った", &[("場所", &req.path)]);
+                Err((422, json!({"detail": format!("{}: 索引の場所の外か、対象外のファイルです", errors::RAG_012.code)})))
+            }
             Err(ReindexError::Failed(e)) => Err(fail(e)),
         }
     }

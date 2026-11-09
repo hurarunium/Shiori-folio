@@ -235,10 +235,12 @@ impl Index {
     pub fn reindex_one(&self, embedder: &Embedder, relative_path: &str) -> Result<usize, ReindexError> {
         // libraryの中の絶対パスで呼ばれても、状態のキーは同期と同じ相対の名前にする
         let path = self.knowledge_dir.join(relative_path.replace('\\', "/"));
-        let rel = rel_of(&path, &self.knowledge_dir);
         if !path.is_file() {
             return Err(ReindexError::NotFound);
         }
+        // 名前は、確かめたのと同じ正規化したパスから作る(`sub/../a.md` を別の名前で登録しない)。
+        // 読むのは従来どおり渡されたパス(正規化でファイル名の濁点の形が変わっても、これまでと同じに扱う)。
+        let rel = reindex_rel(&path, &self.knowledge_dir).ok_or(ReindexError::Rejected)?;
         let _w = self.write_lock.lock().unwrap();
         let count = self.embed_file(embedder, &path, &rel).map_err(|e| ReindexError::Failed(e.to_string()))?;
         let mut state = self.load_state();
@@ -391,6 +393,8 @@ impl std::fmt::Display for EmbedError {
 #[derive(Debug)]
 pub enum ReindexError {
     NotFound,
+    /// 索引の場所の外か、索引の対象外のファイル
+    Rejected,
     Failed(String),
 }
 
@@ -491,6 +495,15 @@ pub fn list_indexable_files(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// `/reindex_file` で受け付けるなら、正規化したパスから作った、同期と同じ相対の名前を返す。
+/// `../` や別の場所の絶対パスで、索引の場所の外のファイルを入れさせない。
+/// 同期の対象外(`_system/`、`._`、md・meta以外)も、同期と同じ基準で断る。
+fn reindex_rel(path: &Path, base: &Path) -> Option<String> {
+    let p = path.canonicalize().ok()?;
+    let base = base.canonicalize().ok()?;
+    (p.starts_with(&base) && is_indexable_path(&p, &base)).then(|| rel_of(&p, &base))
+}
+
 fn is_indexable_path(path: &Path, base: &Path) -> bool {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     let ext_ok = path.extension().and_then(|e| e.to_str()).is_some_and(|e| e == "md" || e == "meta");
@@ -551,6 +564,32 @@ mod tests {
         let got: Vec<String> = list_indexable_files(d.path()).iter().map(|p| rel_of(p, d.path())).collect();
         assert_eq!(got, vec!["a.md", "x/c.meta"]);
         assert_eq!(asset_path_for(&d.path().join("x/c.meta")), Some(d.path().join("x/c")));
+    }
+
+    #[test]
+    fn 登録し直せるのは索引の場所の中の対象だけ() {
+        let d = tempfile::tempdir().unwrap();
+        let lib = d.path().join("library");
+        for p in ["library/a.md", "library/x/c.meta", "library/_system/CLAUDE.md", "library/x/._b.md", "library/x/d.txt", "outside.md"] {
+            let path = d.path().join(p);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "x").unwrap();
+        }
+        let rel = |p: &str| reindex_rel(&lib.join(p), &lib);
+        // 相対の名前と、中の絶対パスは通し、同期と同じ名前にする
+        assert_eq!(rel("a.md").as_deref(), Some("a.md"));
+        assert_eq!(rel("x/c.meta").as_deref(), Some("x/c.meta"));
+        assert_eq!(reindex_rel(&lib.join(lib.join("a.md")), &lib).as_deref(), Some("a.md"));
+        // 中で戻る `..` は、行き着いた先の名前で登録する
+        assert_eq!(rel("x/../a.md").as_deref(), Some("a.md"));
+        // 外へ出る `../` と、外の絶対パスは断る
+        assert_eq!(rel("../outside.md"), None);
+        assert_eq!(reindex_rel(&lib.join(d.path().join("outside.md")), &lib), None);
+        // 同期の対象外も断る(`..` で `_system/` へ入るものも)
+        assert_eq!(rel("_system/CLAUDE.md"), None);
+        assert_eq!(rel("x/../_system/CLAUDE.md"), None);
+        assert_eq!(rel("x/._b.md"), None);
+        assert_eq!(rel("x/d.txt"), None);
     }
 
     #[test]
