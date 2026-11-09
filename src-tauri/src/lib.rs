@@ -3143,7 +3143,8 @@ fn rewrite_yaml_status(path: &Path, key_field: &str, key_value: &str, new_status
     if text.ends_with('\n') {
         new_text.push('\n');
     }
-    std::fs::write(path, new_text).map_err(|e| format!("{}への書き込みに失敗: {e}", path.display()))
+    // 途中で止まっても台帳が半端な内容にならないよう、一時ファイル経由で置き換える。
+    tasks::write_atomically(path, &new_text)
 }
 
 fn remove_yaml_list_item(path: &Path, key_field: &str, key_value: &str) -> Result<(), String> {
@@ -3160,7 +3161,7 @@ fn remove_yaml_list_item(path: &Path, key_field: &str, key_value: &str) -> Resul
     if !remaining.is_empty() && text.ends_with('\n') {
         new_text.push('\n');
     }
-    std::fs::write(path, new_text).map_err(|e| format!("{}への書き込みに失敗: {e}", path.display()))
+    tasks::write_atomically(path, &new_text)
 }
 
 fn pending_action_to_status(action: &str) -> Result<&'static str, String> {
@@ -3227,7 +3228,7 @@ fn rewrite_inbox_review_status(path: &Path, new_status: &str) -> Result<(), Stri
     if text.ends_with('\n') {
         new_text.push('\n');
     }
-    std::fs::write(path, new_text).map_err(|e| format!("{}への書き込みに失敗: {e}", path.display()))
+    tasks::write_atomically(path, &new_text)
 }
 
 // filenameはUI側がlist_pending_itemsで取得した一覧由来の値のみを渡す前提だが、

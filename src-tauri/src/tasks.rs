@@ -143,7 +143,8 @@ fn set_text(front: &mut Mapping, key: &str, value: &str) {
 }
 
 // 一時ファイルに書いて置き換える(途中で落ちても元のファイルを壊さない)。
-fn write_atomically(dest: &Path, content: &str) -> Result<(), String> {
+// lib.rsの台帳(tags.yaml・projects.yaml)の書き換えでも使う。
+pub(crate) fn write_atomically(dest: &Path, content: &str) -> Result<(), String> {
     let name = dest.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     let tmp = dest.with_file_name(format!(".{name}.tmp"));
     if let Err(e) = std::fs::write(&tmp, content) {
