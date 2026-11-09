@@ -31,6 +31,9 @@ pub struct ExtractResult {
     /// 利用者に警告として見せるべきか(秘密情報の検出など)
     pub warn: bool,
     pub truncated: bool,
+    /// 使ったキャッシュのファイル名(キャッシュに無い・残さないときはNone)。キャッシュの掃除に使う
+    #[serde(skip)]
+    pub cache_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -70,21 +73,39 @@ pub fn extract_asset(path: &Path, cache_dir: &Path) -> ExtractResult {
         Err(_) => return ExtractResult::fail("抽出に失敗(OSError)"),
     }
     let Ok(digest) = sha256_file(path) else { return ExtractResult::fail("抽出に失敗(OSError)") };
-    let cache_file = cache_dir.join(format!("{digest}-v{CACHE_VERSION}.json"));
+    let cache_name = format!("{digest}-v{CACHE_VERSION}.json");
+    let cache_file = cache_dir.join(&cache_name);
     if let Ok(text) = std::fs::read_to_string(&cache_file)
-        && let Ok(cached) = serde_json::from_str::<ExtractResult>(&text)
+        && let Ok(mut cached) = serde_json::from_str::<ExtractResult>(&text)
     {
+        cached.cache_name = Some(cache_name);
         return cached;
     }
-    let result = run_worker(path);
+    let mut result = run_worker(path);
     // 一時的な失敗(タイムアウト)はキャッシュしない
     if result.ok || result.reason != "タイムアウト" {
         let _ = std::fs::create_dir_all(cache_dir);
-        if let Ok(json) = serde_json::to_string(&result) {
-            let _ = std::fs::write(&cache_file, json);
+        if let Ok(json) = serde_json::to_string(&result)
+            && std::fs::write(&cache_file, json).is_ok()
+        {
+            result.cache_name = Some(cache_name);
         }
     }
     result
+}
+
+/// 使っていないキャッシュ(`used` に無い `.json`)を消す。消した数を返す。
+/// 素材を差し替えた・消したときの古い結果と、`CACHE_VERSION` を上げる前の結果が残り続けないようにする。
+pub fn prune_cache(cache_dir: &Path, used: &std::collections::HashSet<String>) -> usize {
+    let Ok(entries) = std::fs::read_dir(cache_dir) else { return 0 };
+    let mut removed = 0;
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.ends_with(".json") && !name.starts_with("._") && !used.contains(&name) && std::fs::remove_file(e.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 fn sha256_file(path: &Path) -> std::io::Result<String> {
@@ -212,4 +233,26 @@ fn work(asset: &Path) -> Result<(Vec<SectionOut>, bool), formats::ExtractionErro
         }
     }
     Ok((out, truncated))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 使っていないキャッシュだけを消す() {
+        let d = tempfile::tempdir().unwrap();
+        for name in ["keep-v1.json", "old-v1.json", "keep-v0.json", "._keep-v1.json", "memo.txt"] {
+            std::fs::write(d.path().join(name), "{}").unwrap();
+        }
+        let used: std::collections::HashSet<String> = ["keep-v1.json".to_string()].into();
+        assert_eq!(prune_cache(d.path(), &used), 2);
+        let mut left: Vec<String> =
+            std::fs::read_dir(d.path()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        left.sort();
+        // 使っているもの、Macの付属ファイル、キャッシュ以外のファイルは残す
+        assert_eq!(left, vec!["._keep-v1.json", "keep-v1.json", "memo.txt"]);
+        // フォルダが無くても落ちない
+        assert_eq!(prune_cache(&d.path().join("none"), &used), 0);
+    }
 }

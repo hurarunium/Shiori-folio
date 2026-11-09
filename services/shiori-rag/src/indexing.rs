@@ -31,6 +31,8 @@ const SCHEMA_FILE: &str = ".index_schema";
 const PROGRESS_FILE: &str = ".index_progress.json";
 const WARNINGS_FILE: &str = ".extract_warnings.json";
 const EXTRACT_CACHE_DIR: &str = "extract-cache";
+/// 素材の記事(rel)ごとに、使っている抽出キャッシュの名前。同期の終わりに、ここに無いキャッシュを消す
+const EXTRACT_USED_FILE: &str = ".extract_cache_used.json";
 const META_SUFFIX: &str = ".meta";
 const MEMORY_FILE_NAME: &str = "memory.md";
 const MEMORY_PARENT_CATEGORIES: &[&str] = &["10-projects", "20-areas"];
@@ -231,8 +233,57 @@ impl Index {
         if !report.removed.is_empty() || schema_changed {
             self.save_state(&state);
         }
+        self.prune_extract_cache(&current);
         self.mark_dirty();
         report
+    }
+
+    fn load_extract_used(&self) -> BTreeMap<String, String> {
+        fs::read_to_string(self.state_dir.join(EXTRACT_USED_FILE))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
+    fn save_extract_used(&self, used: &BTreeMap<String, String>) {
+        let path = self.state_dir.join(EXTRACT_USED_FILE);
+        if let Err(e) = write_atomic(&path, serde_json::to_string_pretty(used).unwrap_or_default().as_bytes()) {
+            log::error(errors::RAG_004.code, errors::RAG_004.message, &[("場所", &path.display()), ("理由", &e)]);
+        }
+    }
+
+    /// 記事(rel)が使う抽出キャッシュの名前を覚える(Noneは「使っていない」。書き換えはwrite_lockの中だけで起きる)。
+    /// 前の名前を、ほかの記事がもう使っていなければ、起動を待たずにここで消す(素材の差し替え・抽出の取りやめ)。
+    fn set_extract_used(&self, rel: &str, cache_name: Option<String>) {
+        let mut used = self.load_extract_used();
+        let previous = match &cache_name {
+            Some(name) => used.insert(rel.to_string(), name.clone()),
+            None => used.remove(rel),
+        };
+        if previous == cache_name {
+            return;
+        }
+        self.save_extract_used(&used);
+        if let Some(old) = previous
+            && !used.values().any(|n| *n == old)
+        {
+            let _ = fs::remove_file(self.state_dir.join(EXTRACT_CACHE_DIR).join(old));
+        }
+    }
+
+    /// いまある記事が使っているキャッシュだけを残す(差し替え・削除した素材の古い結果を消す)。
+    fn prune_extract_cache(&self, current: &BTreeMap<String, PathBuf>) {
+        let mut used = self.load_extract_used();
+        let before = used.len();
+        used.retain(|rel, _| current.contains_key(rel));
+        if used.len() != before {
+            self.save_extract_used(&used);
+        }
+        let keep: HashSet<String> = used.into_values().collect();
+        let removed = extract::prune_cache(&self.state_dir.join(EXTRACT_CACHE_DIR), &keep);
+        if removed > 0 {
+            log::info(self.name, "使っていない抽出のキャッシュを消した", &[("件数", &removed)]);
+        }
     }
 
     /// 保存の直後に、1件だけを登録し直す。ファイルが無ければNotFound。戻り値は登録したチャンクの数。
@@ -312,6 +363,7 @@ impl Index {
                 if file_name.ends_with(META_SUFFIX) {
                     if frontmatter::extract_disabled(&text) {
                         self.record_extract_status(rel, Some("extract: false のため抽出しない"), false);
+                        self.set_extract_used(rel, None);
                     } else {
                         let asset_records = self.embed_asset(embedder, path, rel, &category, &stem, &records[0].metadata, &f, records.len())?;
                         records.extend(asset_records);
@@ -340,8 +392,13 @@ impl Index {
         f: &frontmatter::Fields,
         start: usize,
     ) -> Result<Vec<Record>, EmbedError> {
-        let Some(asset) = asset_path_for(meta_path) else { return Ok(Vec::new()) };
+        let Some(asset) = asset_path_for(meta_path) else {
+            // 素材の実体が無いなら、この記事はキャッシュを使っていない
+            self.set_extract_used(rel, None);
+            return Ok(Vec::new());
+        };
         let result = extract::extract_asset(&asset, &self.state_dir.join(EXTRACT_CACHE_DIR));
+        self.set_extract_used(rel, result.cache_name.clone());
         if !result.ok || result.sections.is_empty() {
             let reason = if result.reason.is_empty() { "テキストなし".to_string() } else { result.reason.clone() };
             if !result.warn && result.reason != "未対応の形式" && result.reason != "テキストなし" {
@@ -568,6 +625,29 @@ mod tests {
         let got: Vec<String> = list_indexable_files(d.path()).iter().map(|p| rel_of(p, d.path())).collect();
         assert_eq!(got, vec!["a.md", "x/c.meta"]);
         assert_eq!(asset_path_for(&d.path().join("x/c.meta")), Some(d.path().join("x/c")));
+    }
+
+    #[test]
+    fn 使われなくなった抽出キャッシュは_ほかの記事が使っていなければ消す() {
+        let d = tempfile::tempdir().unwrap();
+        let state = d.path().join("state");
+        let index = Index::open("test", d.path().join("library"), state.clone()).unwrap();
+        let cache = state.join(EXTRACT_CACHE_DIR);
+        fs::create_dir_all(&cache).unwrap();
+        for n in ["a-v1.json", "b-v1.json"] {
+            fs::write(cache.join(n), "{}").unwrap();
+        }
+        // 同じ中身の素材を、2つの記事が使う
+        index.set_extract_used("x.zip.meta", Some("a-v1.json".into()));
+        index.set_extract_used("y.zip.meta", Some("a-v1.json".into()));
+        // xの素材を差し替えても、yが使っているaは残す
+        index.set_extract_used("x.zip.meta", Some("b-v1.json".into()));
+        assert!(cache.join("a-v1.json").exists());
+        // yで抽出をやめる(extract: false・素材が無い)と、だれも使わないaを消す
+        index.set_extract_used("y.zip.meta", None);
+        assert!(!cache.join("a-v1.json").exists());
+        assert!(cache.join("b-v1.json").exists());
+        assert_eq!(index.load_extract_used().into_iter().collect::<Vec<_>>(), vec![("x.zip.meta".to_string(), "b-v1.json".to_string())]);
     }
 
     #[test]
