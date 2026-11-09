@@ -83,7 +83,11 @@ impl Index {
             return c.clone();
         }
         let col = self.collection.read().unwrap();
-        let records: Vec<Record> = col.records().cloned().collect();
+        // 語句の一致では埋め込みを使わないので、いちばん大きいベクトルは写さない(1件あたり約3KB)
+        let records: Vec<Record> = col
+            .records()
+            .map(|r| Record { id: r.id.clone(), document: r.document.clone(), metadata: r.metadata.clone(), embedding: Vec::new() })
+            .collect();
         drop(col);
         let texts: Vec<String> = records.iter().map(|r| passage_of(r)).collect();
         let cache = Arc::new(LexicalCache { index: LexicalIndex::new(&texts), records });
