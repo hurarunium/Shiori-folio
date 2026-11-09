@@ -611,6 +611,14 @@ fn save_memory(
         bail!("tagsが空です");
     }
     let (dest, key) = memory_target(root, &fm)?;
+    // 保存先のmemoryそのものを渡されると、新しい内容を書いた直後に元ファイルの削除で消える
+    // (save_shelfと同じ確認。何かを書く前に断る)。
+    if is_same_file(source, &dest) {
+        bail!(
+            "保存先のmemoryそのものは渡せません。作業用の場所へコピーして書き直してから渡してください: {}",
+            dest.display()
+        );
+    }
     let now = chrono::Local::now().to_rfc3339();
 
     let old_text = if dest.is_file() {
@@ -1132,6 +1140,33 @@ mod tests {
         let (p, key) = memory_target(root, &fm_of("profile", Some("shiori"))).unwrap();
         assert_eq!(p, root.join("40-profile").join("memory-global.md"));
         assert_eq!(key, MEMORY_GLOBAL_KEY);
+    }
+
+    #[test]
+    fn 保存先のmemoryそのものを渡すと何も変えずに断る() {
+        let root = std::env::temp_dir().join(format!("shiori-save-memself-{}", std::process::id()));
+        let dest = root.join("20-areas").join("shiori").join("memory.md");
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        let original = "---\ntitle: t\nkind: memory\nupdated: u1\n---\n本文\n";
+        std::fs::write(&dest, original).unwrap();
+        let fm = Frontmatter {
+            title: Some("t".to_string()),
+            tags: vec!["詩織".to_string()],
+            ..fm_of("area", Some("shiori"))
+        };
+        let result = save_memory(
+            &root,
+            &root.join("projects.yaml"),
+            &root.join("tags.yaml"),
+            &dest,
+            fm,
+            "新しい本文\n",
+            Some("u1".to_string()),
+        );
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), original);
+        assert!(!root.join("_system").exists(), "旧版の退避も行わない");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
