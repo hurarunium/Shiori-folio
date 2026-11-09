@@ -38,8 +38,12 @@ candle-core = { version = "0.11", default-features = false, features = ["acceler
 candle-nn = { version = "0.11", default-features = false, features = ["accelerate"] }
 candle-transformers = { version = "0.11", default-features = false, features = ["accelerate"] }
 
+# 配布物を小さくする(軽量化の見直し、2026-11-09)。本体と同じ設定
 [profile.release]
 debug = false
+lto = true
+codegen-units = 1
+strip = true
 
 [dev-dependencies]
 tempfile = "3.27.0"

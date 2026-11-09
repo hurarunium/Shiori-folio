@@ -80,3 +80,10 @@ windows-sys = { version = "0.59", features = [
 core-foundation = "0.10"
 core-graphics = "0.25"
 
+
+# 配布物を小さくする(軽量化の見直し、2026-11-09)。strip: 記号の情報を外す。lto・codegen-units: 全体で最適化し直す
+# (ビルドは遅くなる)。opt-levelは速さを保つため既定の3のまま。panicは落ちたときの振る舞いを変えないためunwindのまま
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
