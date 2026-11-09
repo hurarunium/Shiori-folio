@@ -13,6 +13,7 @@ import { PetSettingsPage } from "./PetSettingsPage";
 import { DebugPage } from "./DebugPage";
 import { DiagnosePage } from "./DiagnosePage";
 import { HISTORY_LENGTH } from "./shared";
+import { useMainViewStore } from "../../store/useMainViewStore";
 
 type NavKey = "system" | "sidebar" | "notify" | "pet" | "voice" | "advanced" | "model" | "eject" | "diagnose" | "debug";
 
@@ -58,7 +59,20 @@ function ControlPanel() {
   const [ramHistory, setRamHistory] = useState<number[]>([]);
   const [tempHistory, setTempHistory] = useState<number[]>([]);
 
+  // 画面はすべて出したまま隠す作り(MainArea)なので、隠れている間も取り続けないよう、
+  // 設定画面が選ばれていて、窓が見えているときだけ取る(全プロセスの一覧の取り直しや、
+  // Windowsの nvidia-smi の起動を、常駐中に1.5秒ごとに行わないため)。
+  const isSettingsActive = useMainViewStore((s) => s.active === "settings");
+  const [pageVisible, setPageVisible] = useState(() => !document.hidden);
   useEffect(() => {
+    const onChange = () => setPageVisible(!document.hidden);
+    document.addEventListener("visibilitychange", onChange);
+    return () => document.removeEventListener("visibilitychange", onChange);
+  }, []);
+  const shouldPoll = isSettingsActive && pageVisible;
+
+  useEffect(() => {
+    if (!shouldPoll) return;
     let cancelled = false;
 
     const poll = async () => {
@@ -86,7 +100,7 @@ function ControlPanel() {
       cancelled = true;
       clearInterval(timer);
     };
-  }, []);
+  }, [shouldPoll]);
 
   const vramPercent = info?.gpu
     ? Math.round((info.gpu.vramUsedMb / info.gpu.vramTotalMb) * 100)
