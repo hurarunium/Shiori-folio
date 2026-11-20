@@ -107,6 +107,48 @@ fn alive(child: &mut Option<Child>) -> bool {
     }
 }
 
+/// 起こした子のPIDを記録する。窓口を起動し直したとき、まだ健康でない(索引の作成中など)子を、
+/// 2つ目として起こさないために使う
+fn write_pid(data: &Path, name: &str, child: &Child) {
+    let _ = std::fs::write(data.join(format!("{name}.pid")), child.id().to_string());
+}
+
+/// そのPIDが、いま、その名前の実行ファイルとして動いているか(PIDの使い回しで、別のプロセスを見誤らない)
+fn pid_alive(pid: u32, exe_name: &str) -> bool {
+    #[cfg(windows)]
+    {
+        let mut cmd = Command::new("tasklist");
+        cmd.args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"]);
+        hide(&mut cmd);
+        match cmd.output() {
+            Ok(o) => {
+                let t = String::from_utf8_lossy(&o.stdout).to_lowercase();
+                t.contains(&exe_name.to_lowercase()) && t.contains(&format!("\"{pid}\""))
+            }
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        match Command::new("ps").args(["-p", &pid.to_string(), "-o", "comm="]).output() {
+            Ok(o) => String::from_utf8_lossy(&o.stdout).contains(exe_name),
+            Err(_) => false,
+        }
+    }
+}
+
+/// 自分が起こした子、または、前の窓口が起こして動き続けている子(PIDの記録から)がいるか
+fn running(child: &mut Option<Child>, data: &Path, name: &str, exe_name: &str) -> bool {
+    if alive(child) {
+        return true;
+    }
+    std::fs::read_to_string(data.join(format!("{name}.pid")))
+        .ok()
+        .and_then(|t| t.trim().parse::<u32>().ok())
+        .map(|pid| pid_alive(pid, exe_name))
+        .unwrap_or(false)
+}
+
 /// 見張りのスレッドを始める。窓口を止めても子は止めない(次の起動で、そのまま使う)
 pub fn supervise(p: Paths, health: Arc<Health>) {
     std::thread::spawn(move || {
@@ -115,17 +157,23 @@ pub fn supervise(p: Paths, health: Arc<Health>) {
         loop {
             let embed_ok = healthy(p.embed_port);
             health.embed.store(embed_ok, Ordering::Relaxed);
-            if !embed_ok && !alive(&mut embed) {
+            if !embed_ok && !running(&mut embed, &p.data, "embed", &exe("llama-server")) {
                 eprintln!("[見張り] 埋め込みを起動する");
                 embed = spawn_embed(&p).map_err(|e| eprintln!("[見張り] 埋め込みを起動できない: {e}")).ok();
+                if let Some(c) = &embed {
+                    write_pid(&p.data, "embed", c);
+                }
             }
             let rag_ok = healthy(p.rag_port);
             health.rag.store(rag_ok, Ordering::Relaxed);
             // RAGは起動時に索引を同期するため、埋め込みが健康になってから起こす。
-            // 同期の途中(ポートを開く前)は、プロセスが生きている間は起こし直さない
-            if embed_ok && !rag_ok && !alive(&mut rag) {
+            // 同期の途中(ポートを開く前)は、プロセスが生きている間は起こし直さない(窓口の再起動をまたいでも、PIDの記録で見分ける)
+            if embed_ok && !rag_ok && !running(&mut rag, &p.data, "rag", &exe("shiori-rag")) {
                 eprintln!("[見張り] RAGを起動する");
                 rag = spawn_rag(&p).map_err(|e| eprintln!("[見張り] RAGを起動できない: {e}")).ok();
+                if let Some(c) = &rag {
+                    write_pid(&p.data, "rag", c);
+                }
             }
             std::thread::sleep(Duration::from_secs(5));
         }
