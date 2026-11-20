@@ -56,6 +56,28 @@ dir
 
 `runtime`・`bin`・`scripts`・`x1`・`x5`・`x10` が並べばよい。
 
+**2-1b. `llama-server` をCPU版に差し替える(NVIDIAのGPUが無いPCでは必須)**
+
+`runtime` に入っている `llama-server` は、起動時に必ずNVIDIAのドライバ(`nvcuda.dll`)を要求するCUDA版。NVIDIAのGPUが無いPCでは、終了コード `-1073741515` で落ち、窓口が「埋め込みを起動する」を繰り返す(余りのPCはAMDのGPUのみで、これに当たった。11/20)。
+開発機で、同じ版(`b10287`、`b06aa774c`)の公式のCPU版(18MB)を試し、埋め込みの結果がCUDA版とほぼ同じ(コサイン類似度 0.9997)ことを確かめてある。
+
+開発機から、差し替え用のzipを送る:
+
+```powershell
+tailscale file cp "C:\shiori-proto\patch-cpu.zip" laptop-5h6ft2jk:
+```
+
+余りのPCで、zipを `C:\shiori-proto\` へ置いてから(Downloadsに届く場合は移す)、古い物を消して展開する:
+
+```powershell
+Remove-Item C:\shiori-proto\runtime\bin\win\libs-llama -Recurse -Force
+Remove-Item C:\shiori-proto\runtime\bin\win\llama-server.exe
+tar -xf C:\shiori-proto\patch-cpu.zip -C C:\shiori-proto\runtime
+dir C:\shiori-proto\runtime\bin\win
+```
+
+`llama-server.exe` と `ggml-*.dll` などが、`bin\win` の**直下に並べば**よい(`libs-llama` は無くなる。CPU版は、CPU用のDLLを実行ファイルと同じ場所から探すため)。
+
 **2-2. ファイアウォール(Tailscaleの範囲からの9090番だけを許す)**
 
 ```powershell
