@@ -12,11 +12,16 @@
 //!   GET  /doc?path=<論理パス>    → {path, content, rev}
 //!   PUT  /doc  {path, content, expect_rev}  → {rev}。違えば409(現在のrevつき)
 //!   POST /search_library        (RAGへ中継。結果から、サーバーの絶対パスは外す)
+//!   POST /backup                (世代のzipを作る。manifestつき。作ったあとに照らす)
+//!   GET  /backups               (世代の一覧)
+//!   GET  /backup?name=<世代名>   (世代のzipを渡す)
+//!   shiori-proto-server backup-verify <zip> --dest <空のDIR> [--against-library <DIR>] [--against-tasks <DIR>]
 //!
 //! 待ち受けは引数で渡したアドレスだけ。0.0.0.0 などの全部のアドレスは拒否する。
 
 mod audit;
 mod auth;
+mod backup;
 mod children;
 mod store;
 
@@ -42,6 +47,14 @@ struct App {
     rag_port: u16,
     health: Arc<children::Health>,
     no_children: bool,
+    backups: PathBuf,
+    tasks_dir: PathBuf,
+}
+
+/// 窓口の返事。ふつうはJSON。世代のzipを渡すときだけ、ファイルの中身そのもの
+enum Out {
+    Json(Reply),
+    Zip(Vec<u8>),
 }
 
 type Reply = (u16, Value);
@@ -93,6 +106,7 @@ fn run(args: &[String]) -> Result<(), String> {
             println!("端末 {name} のトークン(この1回だけ表示。控えてください):\n{token}");
             Ok(())
         }
+        Some("backup-verify") => backup_verify(&pos, &o),
         Some("token-revoke") => {
             let name = pos.first().ok_or("端末名が必要")?;
             auth::revoke(&PathBuf::from(need(&o, "data")?).join("tokens.json"), name)?;
@@ -129,6 +143,8 @@ fn serve(o: &HashMap<String, String>) -> Result<(), String> {
         );
     }
     let app = Arc::new(App {
+        backups: data.join("backups"),
+        tasks_dir: tasks.clone(),
         store: Store::new(library, tasks),
         tokens: data.join("tokens.json"),
         audit: audit::Audit::open(&data.join("audit.jsonl"))?,
@@ -148,12 +164,25 @@ fn serve(o: &HashMap<String, String>) -> Result<(), String> {
                 let method = req.method().to_string();
                 let remote = req.remote_addr().map(|a| a.ip().to_string()).unwrap_or_default();
                 let url = req.url().to_string();
-                let (device, (code, body)) = handle(&app, &mut req);
+                let (device, out) = handle(&app, &mut req);
+                let code = match &out {
+                    Out::Json((c, _)) => *c,
+                    Out::Zip(_) => 200,
+                };
                 app.audit.record(&device, &remote, &method, &url_path(&url), code, t.elapsed().as_millis() as u64);
-                let resp = Response::from_string(body.to_string())
-                    .with_status_code(code)
-                    .with_header(Header::from_bytes("Content-Type", "application/json; charset=utf-8").unwrap());
-                let _ = req.respond(resp);
+                match out {
+                    Out::Json((code, body)) => {
+                        let resp = Response::from_string(body.to_string())
+                            .with_status_code(code)
+                            .with_header(Header::from_bytes("Content-Type", "application/json; charset=utf-8").unwrap());
+                        let _ = req.respond(resp);
+                    }
+                    Out::Zip(bytes) => {
+                        let resp = Response::from_data(bytes)
+                            .with_header(Header::from_bytes("Content-Type", "application/zip").unwrap());
+                        let _ = req.respond(resp);
+                    }
+                }
             }
         }));
     }
@@ -224,8 +253,28 @@ struct PutDoc {
     expect_rev: String,
 }
 
+/// 世代のzipを渡す窓口(GET /backup?name=)だけは、JSONではないので、ここで分ける
+fn handle(app: &App, req: &mut Request) -> (String, Out) {
+    let url = req.url().to_string();
+    if *req.method() == Method::Get && url.split('?').next() == Some("/backup") {
+        let Some(device) = auth::authenticate(&app.tokens, header_value(req, "Authorization").as_deref()) else {
+            return ("-".into(), Out::Json(err(401, "unauthorized")));
+        };
+        let out = match query_param(&url, "name") {
+            Some(n) if backup::is_generation_name(&n) => match std::fs::read(app.backups.join(&n)) {
+                Ok(b) => Out::Zip(b),
+                Err(_) => Out::Json(err(404, "その世代は無い")),
+            },
+            _ => Out::Json(err(400, "name が正しくない")),
+        };
+        return (device, out);
+    }
+    let (device, reply) = handle_json(app, req);
+    (device, Out::Json(reply))
+}
+
 /// 認証して、窓口を呼ぶ。返り値の先頭は、監査に残す端末名
-fn handle(app: &App, req: &mut Request) -> (String, Reply) {
+fn handle_json(app: &App, req: &mut Request) -> (String, Reply) {
     let method = req.method().clone();
     let url = req.url().to_string();
     let path = url.split('?').next().unwrap_or("").to_string();
@@ -271,6 +320,20 @@ fn handle(app: &App, req: &mut Request) -> (String, Reply) {
             },
         },
         (Method::Post, "/search_library") => search_library(app, &body),
+        (Method::Post, "/backup") => {
+            let lib = app.store.library.clone();
+            match backup::create(&[("library", &lib), ("tasks", &app.tasks_dir)], &app.backups) {
+                Ok(g) => (200, json!({"name": g.name, "size": g.size, "sha256": g.sha256, "files": g.files})),
+                Err(e) => err(500, &format!("世代を作れない: {e}")),
+            }
+        }
+        (Method::Get, "/backups") => {
+            let v: Vec<Value> = backup::list(&app.backups)
+                .into_iter()
+                .map(|(name, size, sha256)| json!({"name": name, "size": size, "sha256": sha256}))
+                .collect();
+            (200, json!(v))
+        }
         _ => err(404, "Not Found"),
     };
     (device, reply)
@@ -311,4 +374,26 @@ fn search_library(app: &App, body: &str) -> Reply {
         Err(ureq::Error::Status(c, _)) => err(502, &format!("検索が{c}を返した")),
         Err(e) => err(503, &format!("検索につながらない: {e}")),
     }
+}
+
+/// shiori-proto-server backup-verify <zip> --dest <空のDIR> [--against-library <DIR>] [--against-tasks <DIR>]
+/// zipを照らし、行き先へ復元し、manifestと一致するか調べる。元のフォルダが渡されれば、それとも照らす。
+fn backup_verify(pos: &[String], o: &HashMap<String, String>) -> Result<(), String> {
+    let zip = PathBuf::from(pos.first().ok_or("zipのパスが必要")?);
+    let dest = PathBuf::from(need(o, "dest")?);
+    let n = backup::verify_zip(&zip)?;
+    println!("zipの中身はmanifestと一致した({n} ファイル)");
+    let n = backup::restore(&zip, &dest)?;
+    println!("復元した中身はmanifestと一致した({n} ファイル): {}", dest.display());
+    for (key, sub) in [("against-library", "library"), ("against-tasks", "tasks")] {
+        if let Some(orig) = o.get(key) {
+            let diff = backup::diff_dirs(&dest.join(sub), &PathBuf::from(orig))?;
+            if diff.is_empty() {
+                println!("{sub}: 元のフォルダと一致した");
+            } else {
+                return Err(format!("{sub}: 元のフォルダと違う: {}", diff.join(" / ")));
+            }
+        }
+    }
+    Ok(())
 }
