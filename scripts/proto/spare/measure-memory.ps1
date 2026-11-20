@@ -7,7 +7,8 @@ param(
     [int]$IntervalSec = 10
 )
 $end = (Get-Date).AddMinutes($Minutes)
-'time,free_mb,server_mb,rag_mb,embed_mb' | Out-File $Out -Encoding utf8
+# free_mb は「まったく使われていない」メモリ。avail_mb は、キャッシュなど、必要なら解放できる分を含む「使える」メモリ(判定にはこちらを使う)
+'time,total_mb,free_mb,avail_mb,server_mb,rag_mb,embed_mb' | Out-File $Out -Encoding utf8
 function Mb($name) {
     $p = Get-Process $name -ErrorAction SilentlyContinue
     if ($p) { [math]::Round(($p | Measure-Object WorkingSet64 -Sum).Sum / 1MB) } else { 0 }
@@ -15,7 +16,9 @@ function Mb($name) {
 while ((Get-Date) -lt $end) {
     $os = Get-CimInstance Win32_OperatingSystem
     $free = [math]::Round($os.FreePhysicalMemory / 1KB)
-    "{0},{1},{2},{3},{4}" -f (Get-Date -Format 's'), $free, (Mb 'shiori-proto-server'), (Mb 'shiori-rag'), (Mb 'llama-server') |
+    $total = [math]::Round($os.TotalVisibleMemorySize / 1KB)
+    $avail = (Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory).AvailableMBytes
+    "{0},{1},{2},{3},{4},{5},{6}" -f (Get-Date -Format 's'), $total, $free, $avail, (Mb 'shiori-proto-server'), (Mb 'shiori-rag'), (Mb 'llama-server') |
         Out-File $Out -Append -Encoding utf8
     Start-Sleep -Seconds $IntervalSec
 }
