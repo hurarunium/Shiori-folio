@@ -16,6 +16,8 @@ use std::sync::Mutex;
 pub enum StoreError {
     /// 読んだ版と今の版が違う。今の版を持つ。
     Conflict { current_rev: String },
+    /// 古い版を元にした更新(memoryのupdatedの不一致など)。メッセージを持つ。
+    Stale(String),
     NotFound(String),
     /// 新規のつもりが、すでにある。
     Exists(String),
@@ -29,9 +31,10 @@ impl fmt::Display for StoreError {
             StoreError::Conflict { current_rev } => {
                 write!(f, "版が一致しません(今の版: {current_rev})")
             }
+            StoreError::Stale(m) => write!(f, "{m}"),
             StoreError::NotFound(p) => write!(f, "見つかりません: {p}"),
             StoreError::Exists(p) => write!(f, "すでにあります: {p}"),
-            StoreError::Invalid(m) => write!(f, "不正な指定です: {m}"),
+            StoreError::Invalid(m) => write!(f, "{m}"),
             StoreError::Io(m) => write!(f, "{m}"),
         }
     }
@@ -166,6 +169,19 @@ pub fn read(root: &Path, rel: &str) -> Result<(Vec<u8>, String), StoreError> {
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(StoreError::NotFound(rel.to_string())),
         Err(e) => Err(io_err("読み込み", &path, e)),
+    }
+}
+
+/// フォルダの中のファイル名の一覧(順不同)。フォルダが無ければ空。
+pub fn list_names(root: &Path, rel_dir: &str) -> Result<Vec<String>, StoreError> {
+    let dir = resolve(root, rel_dir)?;
+    match std::fs::read_dir(&dir) {
+        Ok(rd) => Ok(rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(io_err("一覧の取得", &dir, e)),
     }
 }
 
