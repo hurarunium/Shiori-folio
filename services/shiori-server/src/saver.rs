@@ -8,6 +8,7 @@ use library_store::{assets, journal, notes, shelf, Layout, StoreError};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
+#[derive(Clone)]
 pub struct Roots {
     pub library: PathBuf,
     pub knowledge: PathBuf,
@@ -24,7 +25,7 @@ pub struct SaveReq {
 }
 
 /// 保存のあとに、索引へ入れ直す対象。
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reindex {
     /// libraryからの相対パス
     Library(String),

@@ -271,6 +271,102 @@ pub fn is_generation_name(name: &str) -> bool {
     }
 }
 
+/// 世代の名前から、作った日時(ローカル)を読む。
+pub fn generation_time(name: &str) -> Option<chrono::NaiveDateTime> {
+    if !is_generation_name(name) {
+        return None;
+    }
+    let rest = name.strip_prefix("gen-")?.strip_suffix(".zip")?;
+    let mut it = rest.split('-');
+    let (d, t) = (it.next()?, it.next()?);
+    chrono::NaiveDateTime::parse_from_str(&format!("{d}{t}"), "%Y%m%d%H%M%S").ok()
+}
+
+/// 毎日の世代を残す数と、毎週の世代を残す数
+/// 1日の区切り(日誌と同じ午前5時)
+pub const DAY_START_HOUR: u32 = 5;
+pub const KEEP_DAILY: usize = 7;
+pub const KEEP_WEEKLY: usize = 4;
+
+/// 整理で消す世代の名前を返す(消さない=残すのは、直近 KEEP_DAILY 日の各日の最新と、
+/// それより古いものの各週の最新を直近 KEEP_WEEKLY 週)。名前の形でない物は、触らない。
+pub fn prune_targets(names: &[String]) -> Vec<String> {
+    use chrono::Datelike;
+    let mut gens: Vec<(chrono::NaiveDateTime, &String)> =
+        names.iter().filter_map(|n| generation_time(n).map(|t| (t, n))).collect();
+    gens.sort();
+    let mut keep: std::collections::BTreeSet<&String> = Default::default();
+    // 毎日: 日ごとの最新を、新しい日から KEEP_DAILY 日分
+    let mut by_day: BTreeMap<chrono::NaiveDate, &String> = BTreeMap::new();
+    for (t, n) in &gens {
+        by_day.insert(t.date(), n);
+    }
+    let mut daily_days = Vec::new();
+    for (d, n) in by_day.iter().rev().take(KEEP_DAILY) {
+        keep.insert(*n);
+        daily_days.push(*d);
+    }
+    // 毎週: 毎日の分に入らなかった日のうち、週ごとの最新を、新しい週から KEEP_WEEKLY 週分
+    let mut by_week: BTreeMap<(i32, u32), &String> = BTreeMap::new();
+    for (d, n) in &by_day {
+        if daily_days.contains(d) {
+            continue;
+        }
+        let w = d.iso_week();
+        by_week.insert((w.year(), w.week()), n);
+    }
+    for (_, n) in by_week.iter().rev().take(KEEP_WEEKLY) {
+        keep.insert(*n);
+    }
+    gens.iter().map(|(_, n)| (*n).clone()).filter(|n| !keep.contains(n)).collect()
+}
+
+/// 整理を実行して、消した世代の名前を返す。
+pub fn prune(dir: &Path) -> Vec<String> {
+    let names: Vec<String> = list(dir).into_iter().map(|(n, _, _)| n).collect();
+    let mut gone = Vec::new();
+    for n in prune_targets(&names) {
+        if fs::remove_file(dir.join(&n)).is_ok() {
+            let _ = fs::remove_file(dir.join(format!("{n}.sha256")));
+            gone.push(n);
+        }
+    }
+    gone
+}
+
+/// いま世代を作る時か。毎日 05:00(日誌の1日の区切りと同じ)を境にして、直近の 05:00 より後に作った世代が無ければ作る
+/// (サーバーが 05:00 に止まっていても、起動したときに追いつく)。
+pub fn is_due(now: chrono::NaiveDateTime, latest: Option<chrono::NaiveDateTime>) -> bool {
+    let three = chrono::NaiveTime::from_hms_opt(DAY_START_HOUR, 0, 0).unwrap();
+    let today = now.date().and_time(three);
+    let boundary = if now >= today { today } else { today - chrono::Duration::days(1) };
+    latest.map_or(true, |l| l < boundary)
+}
+
+/// 毎日の世代を作る見張り(`serve` で動かす)。作ったあと、整理する。失敗は標準エラーに出して、次の周で再び試す。
+pub fn spawn_schedule(
+    roots: crate::saver::Roots,
+    dir: PathBuf,
+    clock: crate::Clock,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || loop {
+        let now = clock().naive_local();
+        let latest = list(&dir).into_iter().filter_map(|(n, _, _)| generation_time(&n)).max();
+        if is_due(now, latest) {
+            match create(&[("library", &roots.library), ("knowledge", &roots.knowledge), ("tasks", &roots.tasks)], &dir) {
+                Ok(g) => {
+                    eprintln!("毎日の世代を作った: {}({}ファイル)", g.name, g.files);
+                    for n in prune(&dir) {
+                        eprintln!("古い世代を整理した: {n}");
+                    }
+                }
+                Err(e) => eprintln!("毎日の世代を作れなかった(次の周で再び試す): {e}"),
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(300));
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,5 +422,52 @@ mod tests {
         b[mid] ^= 0xff;
         fs::write(&zip, b).unwrap();
         assert!(verify_zip(&zip).is_err());
+    }
+
+    fn n(s: &str) -> String {
+        format!("gen-{s}.zip")
+    }
+
+    #[test]
+    fn 整理は毎日7と毎週4を残す() {
+        // 2026-11-01(日)から30日、毎日05:00の世代
+        let mut names = Vec::new();
+        let start = chrono::NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
+        for i in 0..50 {
+            let d = start + chrono::Duration::days(i);
+            names.push(n(&format!("{}-030000", d.format("%Y%m%d"))));
+        }
+        // 同じ日の2つめ(手動)
+        names.push(n("20261119-120000"));
+        let gone = prune_targets(&names);
+        let kept: Vec<&String> = names.iter().filter(|x| !gone.contains(x)).collect();
+        // 最新は 2026-11-19(10/1+49日)。毎日7(11/13〜11/19)+毎週4
+        assert!(kept.contains(&&n("20261119-120000")), "同じ日は最新だけ");
+        assert!(!kept.contains(&&n("20261119-030000")));
+        for d in 13..=18 {
+            assert!(kept.contains(&&n(&format!("202611{d}-030000"))), "{d}");
+        }
+        assert_eq!(kept.len(), 7 + 4);
+        // 形でない名前は触らない
+        assert!(prune_targets(&["notes.zip".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn 世代の時が来たか() {
+        let dt = |s: &str| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").unwrap();
+        assert!(is_due(dt("2026-11-22 10:00:00"), None));
+        // 今日の05:00の後に作ってあれば、不要
+        assert!(!is_due(dt("2026-11-22 10:00:00"), Some(dt("2026-11-22 05:00:05"))));
+        // 05:00の前なら、昨日の05:00が境
+        assert!(!is_due(dt("2026-11-22 04:00:00"), Some(dt("2026-11-21 05:00:05"))));
+        assert!(is_due(dt("2026-11-22 04:00:00"), Some(dt("2026-11-21 04:00:00"))));
+        // 起動したら、前の日の世代しか無い(追いつく)
+        assert!(is_due(dt("2026-11-22 08:00:00"), Some(dt("2026-11-21 05:00:05"))));
+    }
+
+    #[test]
+    fn 名前から日時を読む() {
+        assert_eq!(generation_time("gen-20261122-030000-2.zip").unwrap().to_string(), "2026-11-22 03:00:00");
+        assert!(generation_time("x.zip").is_none());
     }
 }

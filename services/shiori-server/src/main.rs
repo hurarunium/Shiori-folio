@@ -5,6 +5,8 @@
 //!   shiori-server token add <端末名> --data <DIR>       (トークンを1回だけ表示する)
 //!   shiori-server token revoke <端末名> --data <DIR>
 //!   shiori-server token list --data <DIR>
+//!   shiori-server restore <zip> --dest <空のDIR> [--against-library <DIR>] [--against-tasks <DIR>]   (backup-verify・verify も同じ)
+//!   (serve は、毎日05:00(日誌の1日の区切りと同じ)に世代を作り、毎日7・毎週4を残して整理する。止まっていた分は起動時に追いつく)
 //!   shiori-server backup-verify <zip> --dest <空のDIR> [--against-library <DIR>] [--against-tasks <DIR>]
 //!   shiori-server migrate-plan <元のlibrary> <行き先>     (予行。何も書かない。報告を出す)
 //!   shiori-server migrate-apply <元のlibrary> <行き先>    (3つの段階を、照合しながら適用する。行き先は空の場所)
@@ -64,6 +66,12 @@ fn run(args: &[String]) -> Result<(), String> {
                 cfg.no_children = true;
             }
             let running = shiori_server::start(cfg)?;
+            // 毎日05:00の世代(止まっていた分は、起動時に追いつく)
+            backup::spawn_schedule(
+                running.app.roots.clone(),
+                running.app.backups.clone(),
+                running.app.clock.clone(),
+            );
             eprintln!("待ち受け: http://{}(子の起動: {})", running.addr, if running.app.cfg.no_children { "しない" } else { "する" });
             running.wait();
             Ok(())
@@ -94,7 +102,7 @@ fn run(args: &[String]) -> Result<(), String> {
                 _ => Err("使い方: shiori-server token add|revoke|list …".into()),
             }
         }
-        Some("backup-verify") => backup_verify(&pos, &o),
+        Some("backup-verify" | "restore" | "verify") => backup_verify(&pos, &o),
         Some(cmd @ ("migrate-plan" | "migrate-apply" | "migrate-verify")) => migrate(cmd, &pos),
         _ => Err("使い方: shiori-server serve|token|backup-verify|migrate-plan|migrate-apply|migrate-verify …(ファイル先頭の説明を参照)".into()),
     }
