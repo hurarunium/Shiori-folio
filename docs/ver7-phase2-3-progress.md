@@ -66,3 +66,10 @@
 - CLI: `shiori-save --doc-get <path> --out <ファイル>`(読んで、版を表示)、`shiori-save --doc <path> [--expect-rev <版>] <ファイル>`(書く)。衝突のとき、「先に書き換えました。読み直して…」と案内する。
 - 通し試験 44件(手順書の新規・読み出し・上書き・退避・衝突・台帳の拒否・規約の新規の拒否を追加)。
 
+
+## Phase 4・5(2026-11-22 夜)
+
+- Phase 4(アプリ): タスク・図書館・棚・検索・メモ・保留・規約・申し送り・空き容量・素材を開く、をサーバー経由にした。T5(目視テスト)は合格。詳細は `docs/ver7-phase4-survey.md`。
+- Phase 5-B(移行ツール): `shiori-server migrate-plan|migrate-apply|migrate-verify`(`library_store::migrate`)。本物のlibraryで予行と、作業場所への適用・照合に通った(警告なし)。
+- Phase 5(バックアップ・最小限): 毎日 05:00(日誌と同じ区切り)の世代、毎日7・毎週4の整理、`restore`・`verify`。SSDへ写すボタン・知らせ・画面は、7.0の後。会話の記録は世代に入れない。
+- 次の手順は `docs/ver7-phase5-6-runbook.md`。
