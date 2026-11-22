@@ -1,0 +1,34 @@
+[package]
+name = "shiori-server"
+version = "0.1.0"
+edition = "2021"
+description = "詩織Ver7.0のサーバー(正本の置き場・窓口・書き込みの一元化・検索の中継・世代のバックアップ)。Tauriに依存しない"
+
+[lib]
+name = "shiori_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "shiori-server"
+path = "src/main.rs"
+
+[dependencies]
+chrono = "0.4"
+getrandom = "0.2"
+library_store = { path = "../../crates/library_store" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+sha2 = "0.10"
+tiny_http = "0.12"
+ureq = { version = "2", features = ["json"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+debug = false
+lto = true
+codegen-units = 1
+strip = true
