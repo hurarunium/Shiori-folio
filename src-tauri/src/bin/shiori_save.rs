@@ -215,8 +215,42 @@ fn save_remote(
         }
         std::fs::remove_file(source).with_context(|| format!("移動元{}の削除に失敗", source.display()))?;
     }
+    show_server_notes(&result);
     let route = result.get("kind").and_then(|v| v.as_str()).unwrap_or("記事").to_string();
     print_result(&route, &result)
+}
+
+/// サーバーの結果にある、書き方の規則の警告と、外した項目の記録を、標準エラーに表示する(保存は済んでいる)。
+/// 警告は、文字列(v6.2の上限の警告)または `{id, severity, message, excerpt}`。
+fn show_server_notes(result: &serde_json::Value) {
+    if let Some(warnings) = result.get("warnings").and_then(|w| w.as_array()) {
+        for w in warnings {
+            let line = match w.as_str() {
+                Some(s) => s.to_string(),
+                None => {
+                    let id = w.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                    let message = w.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                    match w.get("excerpt").and_then(|v| v.as_str()) {
+                        Some(e) => format!("[{id}] {message}: {e}"),
+                        None => format!("[{id}] {message}"),
+                    }
+                }
+            };
+            eprintln!("警告: {line}");
+            shiori_log::warn("SAVE", "書き方の警告", &[("内容", &line)]);
+        }
+    }
+    let removed = result.get("removed_items").and_then(|v| v.as_u64()).unwrap_or(0);
+    if removed > 0 {
+        let to = result.get("removed_recorded_to");
+        match to.and_then(|t| t.get("path")).and_then(|p| p.as_str()) {
+            Some(path) => eprintln!("memoryから外した{removed}件の項目を、日誌に記録しました: {path}"),
+            None => {
+                let why = to.and_then(|t| t.get("error")).and_then(|e| e.as_str()).unwrap_or("理由は不明");
+                eprintln!("警告: memoryから外した{removed}件の項目を、日誌に記録できませんでした({why})。前の版は退避に残っています");
+            }
+        }
+    }
 }
 
 /// 日誌への追記。節の本文(見出しなし)をサーバーへ送る。日付・見出し・全体の日誌の目次は、サーバーが付ける。
@@ -242,6 +276,7 @@ fn journal_remote(
     if let Some(o) = shown.as_object_mut() {
         o.insert("destination".into(), result.get("path").cloned().unwrap_or_default());
     }
+    show_server_notes(&result);
     print_result("日誌", &shown)
 }
 

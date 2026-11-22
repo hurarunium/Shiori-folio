@@ -465,5 +465,50 @@ fn タスクの不正な入力は断る() {
     assert_eq!(e.call("GET", "/api/v1/tasks", None, None).0, 401);
 }
 
+#[test]
+fn 日誌の追記の結果に書き方の規則の警告が付く() {
+    let e = Env::new();
+    let (code, v) = e.win("POST", "/api/v1/journal/append", Some(json!({"project": "shiori", "content": "### 次にやること\n\n- 設計を読む\n"})));
+    assert_eq!(code, 200, "保存は止まらない: {v}");
+    let ids: Vec<&str> = v["warnings"].as_array().unwrap().iter().map(|w| w["id"].as_str().unwrap()).collect();
+    assert!(ids.contains(&"J1") && ids.contains(&"J2"), "{v}");
+    let w = &v["warnings"][0];
+    assert!(w["severity"] == "normal" || w["severity"] == "weak", "{w}");
+    assert!(w["message"].as_str().unwrap().len() > 5);
+    assert!(std::fs::read_to_string(e.lib().join("20-projects/shiori/journal/2026-11-22.md")).unwrap().contains("設計を読む"));
+}
+
+#[test]
+fn memoryを整理して外した項目は日誌へ自動で記録され長さの警告は出ない() {
+    let e = Env::new();
+    let mem = |body: &str| format!("---\ntitle: shiori memory\ntype: project\nkind: memory\nproject: shiori\ntags: [詩織]\n---\n## やること\n\n{body}");
+    let (_, v) = e.save("memory.md", &mem("- Phase 1 を進める(11/22)\n- 4-6の2回目を集計し、合否を決める(11/22)\n- 外のネットワークから、4-1・4-8を試す。(11/20)\n"));
+    let updated = v["updated"].as_str().unwrap().to_string();
+    assert_eq!(v["removed_items"], 0);
+
+    // 「4-6…」を外し、長い本文にする
+    *e.now.lock().unwrap() = at("2026-11-22T15:00:00+09:00");
+    let big: String = (0..400).map(|i| format!("- 項目{i}: `file{i}.rs` の状態を記録した(11/22)\n")).collect();
+    let body = mem(&format!("- Phase 1 を進める(11/23)\n- 外のネットワークから、4-1・4-8を試す。(11/20)\n{big}"));
+    let (code, v) = e.win("POST", "/api/v1/save", Some(json!({"file_name": "memory.md", "content": body, "expect_updated": updated})));
+    assert_eq!(code, 200, "{v}");
+    assert_eq!(v["removed_items"], 1);
+    assert!(v["size"]["chars"].as_u64().unwrap() > 6000, "大きさは情報として返る: {v}");
+    assert!(v["warnings"].as_array().unwrap().is_empty(), "長くても警告しない: {}", v["warnings"]);
+    let rec = &v["removed_recorded_to"];
+    assert_eq!(rec["path"], "library/20-projects/shiori/journal/2026-11-22.md", "{v}");
+    assert_eq!(rec["heading"], "15:00 win・memory整理");
+    let journal = std::fs::read_to_string(e.lib().join("20-projects/shiori/journal/2026-11-22.md")).unwrap();
+    assert!(journal.contains("### memoryから外した項目\n\n- 4-6の2回目を集計し、合否を決める(11/22)\n"), "{journal}");
+
+    // 全体用のmemoryから外した項目は、全体の日誌へ
+    let g = |b: &str| format!("---\ntitle: 全体\ntype: profile\nkind: memory\ntags: [詩織]\n---\n## 約束事\n\n{b}");
+    let (_, v) = e.save("memory-global.md", &g("- 古い決まり(11/01)\n- 残す決まり(11/02)\n"));
+    let u = v["updated"].as_str().unwrap().to_string();
+    *e.now.lock().unwrap() = at("2026-11-22T16:00:00+09:00");
+    let (_, v) = e.win("POST", "/api/v1/save", Some(json!({"file_name": "memory-global.md", "content": g("- 残す決まり(11/02)\n"), "expect_updated": u})));
+    assert_eq!(v["removed_recorded_to"]["path"], "library/10-common/journal/2026-11-22.md", "{v}");
+}
+
 #[allow(dead_code)]
 fn _unused(_: &Path) {}

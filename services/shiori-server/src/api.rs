@@ -126,7 +126,6 @@ impl App {
 
     fn reindex(&self, target: &Reindex) -> bool {
         match target {
-            Reindex::None => false,
             Reindex::Library(rel) => relay::reindex(self.cfg.rag_port, "reindex_file", rel),
             Reindex::Shelf(rel) => relay::reindex(self.cfg.rag_port, "reindex_shelf_file", rel),
         }
@@ -198,7 +197,7 @@ fn route(app: &App, method: &Method, path: &str, url: &str, body: &str, device: 
         (Method::Get, "/api/v1/doc") => doc_get(app, url),
         (Method::Put, "/api/v1/doc") => doc_put(app, body),
         (Method::Delete, "/api/v1/doc") => doc_delete(app, url),
-        (Method::Post, "/api/v1/save") => save(app, body),
+        (Method::Post, "/api/v1/save") => save(app, body, device),
         (Method::Post, "/api/v1/journal/append") => journal_append(app, body, device),
         (Method::Post, "/api/v1/search/library") => search(app, "search_library", body),
         (Method::Post, "/api/v1/search/shelf") => search(app, "search_shelf", body),
@@ -286,16 +285,17 @@ struct SaveBody {
     asset_upload: Option<String>,
 }
 
-fn save(app: &App, body: &str) -> Reply {
+fn save(app: &App, body: &str, device: &str) -> Reply {
     let b: SaveBody = match parse(body) {
         Ok(b) => b,
         Err(r) => return r,
     };
     let req = SaveReq { file_name: b.file_name, content: b.content, expect_updated: b.expect_updated, asset_upload: b.asset_upload };
     let now = (app.clock)();
-    match saver::save(&app.roots, app.layout, &app.uploads, &req, &now) {
+    match saver::save(&app.roots, app.layout, &app.uploads, &req, device, &now) {
         Ok((mut out, reindex)) => {
-            let indexed = app.reindex(&reindex);
+            // 索引の更新が要る対象が無い(下書きの棚など)ときは false。全部更新できたときだけ true
+            let indexed = !reindex.is_empty() && reindex.iter().all(|t| app.reindex(t));
             if let Some(o) = out.as_object_mut() {
                 o.insert("indexed".into(), json!(indexed));
             }
@@ -338,6 +338,7 @@ fn journal_append(app: &App, body: &str, device: &str) -> Reply {
                 json!({
                     "path": format!("library/{}", a.rel), "day": a.day, "heading": a.heading, "rev": a.rev,
                     "toc_added": a.toc_added, "toc_error": a.toc_error, "indexed": indexed,
+                    "warnings": a.warnings,
                 }),
             )
         }
