@@ -82,3 +82,9 @@
 - アプリ(開発機)を、余りのPCのサーバーにつないで確認: 図書館の一覧・検索・素材を開く。
 - 見つかった不具合: 図書館の画面が `20-projects`・`10-common` を知らず、「未分類」になっていた。直した(a3249f7)。
 - 注意: 試作のタスク(`ShioriProtoServer`)が1分おきに子を起こし直すため、`runtime` を移すには、先にタスクを無効にしてプロセスを止める必要があった。スクリプトの実行は、`-ExecutionPolicy Bypass` を付けて行う。
+
+## T3(Mac)と、内蔵への配置(2026-11-22 夜)
+
+- T3: Macから、Tailscale経由で、日誌の追記に成功した(見出しは `mac・…`)。WindowsとMacが5件ずつ並列で追記して、11節がすべて残った。Macでは、CLI3つ(`shiori_save`・`shiori_task`・`mcp_server`)をビルドして `~/ShioriFolio7/` に置いた。アプリ本体の Mac 版は、まだ確認していない。
+- 内蔵への配置(Windows): リリース版 `shiori-folio.exe` を `C:\ShioriFolio7\`(`config.json`・`data\server.json` つき)に置いて、SSDなしで、図書館・検索・素材・タスクが動いた。タスクバーへの固定も確認。
+- 見つかった不具合: サーバー接続のとき、起動で手元の `tasks\INDEX.md` を書いていた(内蔵だと `C:\tasks` ができた)。書かないようにした。

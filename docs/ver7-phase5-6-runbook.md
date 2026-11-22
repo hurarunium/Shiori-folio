@@ -59,6 +59,7 @@
 5. 索引を入れる(大きな索引は、開発機で作って送る)。
 6. AIの入口を切り替える(`docs/ver7-drafts/` の入口3つ、skill 3つ、`_system/CLAUDE.md` の改訂)。
 6-2. 試験の間に使ったトークンは、失効させて作り直す(`shiori-server token revoke <端末名> --data <data>` → `token add`)。作り直した値は、チャットなどに貼らず、`server.json` に自分で置く。
+6-3. 端末のWindowsのアプリを、内蔵(`C:\ShioriFolio7\`)に置く。`npm.cmd run tauri build -- --no-bundle` で作った `shiori-folio.exe` と、リポジトリの `config.json`、`data\server.json` の3つを置く(`C:\ShioriFolio7\shiori-folio.exe`・`config.json`・`data\server.json`)。開発版のアプリは、先に閉じる(ホットキーを取り合う)。右クリック → タスクバーに固定。Macは `~/ShioriFolio7/`(アプリは、別途、`.app` の形で確認する)。
 7. 両方の端末の `data\server.json`(`{url, token}`)を置き、アプリ・CLIをサーバーへつなぐ。
 8. SSDの `portable\` に、凍結の目印を置く(書き込まない旨)。
 9. サーバーで、最初の世代を作り、SSDへ写す(1と同じ手順で、復元の確認まで)。
