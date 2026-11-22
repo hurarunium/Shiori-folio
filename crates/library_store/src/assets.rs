@@ -6,6 +6,7 @@
 //! 原本の削除は、呼び出し側が行う(コピーだけにしたいときがあるため)。
 
 use crate::fsx::{self, Cond, StoreError};
+use crate::layout::Layout;
 use crate::notes::Frontmatter;
 use crate::registry;
 use sha2::{Digest, Sha256};
@@ -37,6 +38,11 @@ pub fn secret_name_reason(file_name: &str) -> Option<&'static str> {
 /// 素材のtype/projectから、保存先の`files/`(libraryからの相対)を決める。
 /// project/areaのprojectが未登録なら、`projects.yaml`へ`pending`で登録する。
 pub fn decide_asset_destination(root: &Path, fm: &Frontmatter) -> Result<String, StoreError> {
+    decide_asset_destination_with(Layout::Legacy, root, fm)
+}
+
+/// `decide_asset_destination` の、置き場の並びを指定する版。
+pub fn decide_asset_destination_with(layout: Layout, root: &Path, fm: &Frontmatter) -> Result<String, StoreError> {
     if fm.title.as_deref().map(str::trim).unwrap_or("").is_empty() {
         return Err(StoreError::Invalid("titleが空です".into()));
     }
@@ -50,8 +56,7 @@ pub fn decide_asset_destination(root: &Path, fm: &Frontmatter) -> Result<String,
                 StoreError::Invalid("typeがproject/areaの素材にはprojectが必要です(保存先が決まりません)".into())
             })?;
             registry::ensure_project(root, p)?;
-            let top = if t == "project" { "10-projects" } else { "20-areas" };
-            Ok(format!("{top}/{p}/files"))
+            Ok(format!("{}/files", layout.project_dir(t, p)?))
         }
         Some("resource") => Ok("30-resources/files".to_string()),
         Some("profile") => Err(StoreError::Invalid("type: profileには素材を置けません".into())),
@@ -106,6 +111,18 @@ pub struct SavedAsset {
 pub fn save_asset(
     root: &Path,
     asset_source: &Path,
+    fm: Frontmatter,
+    body: &str,
+    now: &str,
+) -> Result<SavedAsset, StoreError> {
+    save_asset_with(Layout::Legacy, root, asset_source, fm, body, now)
+}
+
+/// `save_asset` の、置き場の並びを指定する版。
+pub fn save_asset_with(
+    layout: Layout,
+    root: &Path,
+    asset_source: &Path,
     mut fm: Frontmatter,
     body: &str,
     now: &str,
@@ -128,7 +145,7 @@ pub fn save_asset(
     }
     fm.tags = tags;
 
-    let dest_dir = decide_asset_destination(root, &fm)?;
+    let dest_dir = decide_asset_destination_with(layout, root, &fm)?;
 
     let source_hash = sha256_of(asset_source)?;
     let size = std::fs::metadata(asset_source)
@@ -371,4 +388,22 @@ mod tests {
         contents.dedup();
         assert_eq!(contents.len(), 6, "6つとも別の中身のまま残る");
     }
+
+    #[test]
+    fn v7ではprojectの素材を20_projectsの下へ置く() {
+        let l = Lib::new("v7");
+        let saved = save_asset_with(Layout::V7, &l.0, &l.source("a.png", b"png"), fm("title: t
+type: project
+project: shiori
+tags: [詩織]"), "x
+", "n").unwrap();
+        assert_eq!(saved.asset_rel, "20-projects/shiori/files/a.png");
+        let area = save_asset_with(Layout::V7, &l.0, &l.source("b.png", b"png"), fm("title: t
+type: area
+project: shiori
+tags: [詩織]"), "x
+", "n");
+        assert!(matches!(area, Err(StoreError::Invalid(_))));
+    }
+
 }

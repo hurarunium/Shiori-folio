@@ -4,8 +4,13 @@
 pub mod assets;
 pub mod fsx;
 pub mod inbox;
+pub mod journal;
+pub mod layout;
+pub mod log;
 pub mod notes;
 pub mod registry;
 pub mod shelf;
+pub mod tasks;
 
 pub use fsx::{Cond, StoreError, Written};
+pub use layout::Layout;

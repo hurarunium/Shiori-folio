@@ -5508,6 +5508,11 @@ fn handle_hotkey_toggle(app: &tauri::AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     use tauri_plugin_global_shortcut::ShortcutState;
+    // library_storeのログ(タスクの追加・完了など)を、詩織のログへつなぐ
+    library_store::log::set_sink(|level, part, event, fields| match level {
+        "warn" => shiori_log::warn(part, event, fields),
+        _ => shiori_log::info(part, event, fields),
+    });
     let root = project_root();
     let before = repair::before_log(&root);
     shiori_log::init(

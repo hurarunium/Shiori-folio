@@ -5,6 +5,7 @@
 //! 決定的な規則を担う。アプリ・CLI・サーバーが、同じ規則で保存するために、ここに置く。
 
 use crate::fsx::{self, Cond, StoreError};
+use crate::layout::Layout;
 use crate::registry;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -118,6 +119,11 @@ pub fn split_frontmatter(content: &str) -> Result<(Frontmatter, String), StoreEr
 /// frontmatterの必須項目を検証する。不備があれば理由の文を返す(Noneなら正常)。
 /// 不備のある記事は、保存を諦めず、理由つきで00-inboxへ置く。
 pub fn validate(fm: &Frontmatter) -> Option<String> {
+    validate_with(Layout::Legacy, fm)
+}
+
+/// 置き場の並び(`Layout`)に応じて検証する。
+pub fn validate_with(layout: Layout, fm: &Frontmatter) -> Option<String> {
     if fm.title.as_deref().map(str::trim).unwrap_or("").is_empty() {
         return Some("titleが空です".to_string());
     }
@@ -125,7 +131,7 @@ pub fn validate(fm: &Frontmatter) -> Option<String> {
         return Some("tagsが空です".to_string());
     }
     match fm.kind.as_deref() {
-        Some(k) if VALID_TYPES.contains(&k) => {
+        Some(k) if layout.valid_types().contains(&k) => {
             // project/areaはkind(journal|resource)も必須。resource/profileには
             // 存在しない概念なので、指定されていても無視する(バリデーション対象外)。
             if k == "project" || k == "area" {
@@ -147,13 +153,18 @@ pub fn validate(fm: &Frontmatter) -> Option<String> {
                 None
             }
         }
-        other => Some(format!("typeが不正です(値: {other:?}, 許可値: {VALID_TYPES:?})")),
+        other => Some(format!("typeが不正です(値: {other:?}, 許可値: {:?})", layout.valid_types())),
     }
 }
 
 /// 配置先のフォルダ(libraryからの相対。区切りは`/`)を決める。`validate`を通った記事だけを渡す。
 /// project/areaで、projectが未登録なら、`projects.yaml` へ `pending` で登録する。
 pub fn decide_destination(root: &Path, fm: &Frontmatter) -> Result<String, StoreError> {
+    decide_destination_with(Layout::Legacy, root, fm)
+}
+
+/// `decide_destination` の、置き場の並びを指定する版。
+pub fn decide_destination_with(layout: Layout, root: &Path, fm: &Frontmatter) -> Result<String, StoreError> {
     let project = fm.project.as_deref().map(str::trim).filter(|p| !p.is_empty());
     let kind = fm
         .kind
@@ -170,7 +181,7 @@ pub fn decide_destination(root: &Path, fm: &Frontmatter) -> Result<String, Store
         "project" => match project {
             Some(p) => {
                 registry::ensure_project(root, p)?;
-                Ok(format!("10-projects/{p}/{}", sub_kind()?))
+                Ok(format!("{}/{}", layout.project_dir("project", p)?, sub_kind()?))
             }
             None => Ok(INBOX_DIR.to_string()),
         },
@@ -180,7 +191,7 @@ pub fn decide_destination(root: &Path, fm: &Frontmatter) -> Result<String, Store
         "area" => match project {
             Some(p) => {
                 registry::ensure_project(root, p)?;
-                Ok(format!("20-areas/{p}/{}", sub_kind()?))
+                Ok(format!("{}/{}", layout.project_dir("area", p)?, sub_kind()?))
             }
             None => Ok(INBOX_DIR.to_string()),
         },
@@ -216,7 +227,23 @@ pub struct SavedArticle {
 /// 記事を保存する: タグの正規化 → 検証 → 配置先の決定 → 書き込み(同名があれば連番)。
 /// `file_name` は元のファイル名(`.md`)。`fm.date` は、呼び出し側が現在時刻で上書きしておく。
 /// 元のファイルの削除と、索引への反映は、呼び出し側が行う。
-pub fn save_article(root: &Path, file_name: &str, mut fm: Frontmatter, body: &str) -> Result<SavedArticle, StoreError> {
+pub fn save_article(root: &Path, file_name: &str, fm: Frontmatter, body: &str) -> Result<SavedArticle, StoreError> {
+    save_article_with(Layout::Legacy, root, file_name, fm, body)
+}
+
+/// `save_article` の、置き場の並びを指定する版。V7では `type: area` を、inboxへ逃がさず断る。
+pub fn save_article_with(
+    layout: Layout,
+    root: &Path,
+    file_name: &str,
+    mut fm: Frontmatter,
+    body: &str,
+) -> Result<SavedArticle, StoreError> {
+    if fm.kind.as_deref() == Some("area") {
+        if let Some(reason) = layout.area_rejection() {
+            return Err(StoreError::Invalid(reason.to_string()));
+        }
+    }
     if file_name.contains('/') || file_name.contains('\\') {
         return Err(StoreError::Invalid(format!("ファイル名に区切りは使えません: {file_name}")));
     }
@@ -232,12 +259,12 @@ pub fn save_article(root: &Path, file_name: &str, mut fm: Frontmatter, body: &st
     }
     fm.tags = tags;
 
-    let (dir, inbox_reason) = match validate(&fm) {
+    let (dir, inbox_reason) = match validate_with(layout, &fm) {
         Some(reason) => {
             fm.reason = Some(reason.clone());
             (INBOX_DIR.to_string(), Some(reason))
         }
-        None => (decide_destination(root, &fm)?, None),
+        None => (decide_destination_with(layout, root, &fm)?, None),
     };
 
     let frontmatter_yaml = serde_yaml::to_string(&fm)
@@ -265,7 +292,6 @@ pub fn save_article(root: &Path, file_name: &str, mut fm: Frontmatter, body: &st
 
 pub const MEMORY_KIND: &str = "memory";
 const MEMORY_FILE_NAME: &str = "memory.md";
-const MEMORY_GLOBAL_FILE_NAME: &str = "memory-global.md";
 // 上書き前の旧版を退避する先(library/_system/配下は索引から除外される)。
 const MEMORY_HISTORY_DIR: &str = "_system/memory-history";
 const MEMORY_HISTORY_GENERATIONS: usize = 3;
@@ -286,6 +312,11 @@ pub fn memory_over_limit(body: &str) -> Option<(usize, usize)> {
 /// memoryの保存先(libraryからの相対パス)と、退避ファイル名に使う識別子(project id、全体用は"_global")。
 /// 副作用なし(projects.yamlへの登録は、競合検知を通ってから行う)。
 pub fn memory_target(fm: &Frontmatter) -> Result<(String, String), StoreError> {
+    memory_target_with(Layout::Legacy, fm)
+}
+
+/// `memory_target` の、置き場の並びを指定する版。
+pub fn memory_target_with(layout: Layout, fm: &Frontmatter) -> Result<(String, String), StoreError> {
     let project = fm.project.as_deref().map(str::trim).filter(|p| !p.is_empty());
     match fm.kind.as_deref() {
         Some(t @ ("project" | "area")) => {
@@ -295,11 +326,10 @@ pub fn memory_target(fm: &Frontmatter) -> Result<(String, String), StoreError> {
             if p.contains(['/', '\\']) || p.contains("..") {
                 return Err(StoreError::Invalid(format!("projectにパス区切りや..は使えません: {p}")));
             }
-            let top = if t == "project" { "10-projects" } else { "20-areas" };
-            Ok((format!("{top}/{p}/{MEMORY_FILE_NAME}"), p.to_string()))
+            Ok((format!("{}/{MEMORY_FILE_NAME}", layout.project_dir(t, p)?), p.to_string()))
         }
         // 全体用。projectが付いていても無視する。
-        Some("profile") => Ok((format!("40-profile/{MEMORY_GLOBAL_FILE_NAME}"), MEMORY_GLOBAL_KEY.to_string())),
+        Some("profile") => Ok((layout.global_memory_rel().to_string(), MEMORY_GLOBAL_KEY.to_string())),
         other => Err(StoreError::Invalid(format!(
             "memoryのtypeが不正です(値: {other:?}, 許可値: project/area/profile)"
         ))),
@@ -374,6 +404,18 @@ pub fn over_limit_warning(lines: usize, chars: usize) -> String {
 /// `now` は呼び出し側が渡す現在時刻(ISO8601)。元ファイルの削除と索引への反映も、呼び出し側が行う。
 pub fn save_memory(
     root: &Path,
+    fm: Frontmatter,
+    body: &str,
+    expect_updated: Option<&str>,
+    now: &str,
+) -> Result<SavedMemory, StoreError> {
+    save_memory_with(Layout::Legacy, root, fm, body, expect_updated, now)
+}
+
+/// `save_memory` の、置き場の並びを指定する版。
+pub fn save_memory_with(
+    layout: Layout,
+    root: &Path,
     mut fm: Frontmatter,
     body: &str,
     expect_updated: Option<&str>,
@@ -385,7 +427,7 @@ pub fn save_memory(
     if fm.tags.is_empty() {
         return Err(StoreError::Invalid("tagsが空です".into()));
     }
-    let (rel, key) = memory_target(&fm)?;
+    let (rel, key) = memory_target_with(layout, &fm)?;
 
     let old: Option<(String, String)> = match fsx::read(root, &rel) {
         Ok((bytes, rev)) => Some((
@@ -831,6 +873,56 @@ mod tests {
         let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
         assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1, "{results:?}");
         assert_eq!(results.iter().filter(|r| matches!(r, Err(StoreError::Stale(_)))).count(), 5);
+    }
+
+
+    // ---- V7の置き場 ----
+
+    #[test]
+    fn v7では記事とmemoryを20_projectsと10_commonへ置きareaを断る() {
+        let l = Lib::new("v7");
+        let f = fm("title: あ
+type: project
+kind: journal
+project: shiori
+tags: [詩織]");
+        let a = save_article_with(Layout::V7, &l.0, "a.md", f, "本文
+").unwrap();
+        assert_eq!(a.rel, "20-projects/shiori/journal/a.md");
+        // 全体用のmemory
+        let g = save_memory_with(Layout::V7, &l.0, fm("title: t
+type: profile
+tags: [詩織]"), "x
+", None, "2026-11-22T10:00:00+09:00").unwrap();
+        assert_eq!(g.rel, "10-common/memory-global.md");
+        let m = save_memory_with(Layout::V7, &l.0, fm("title: t
+type: project
+project: shiori
+tags: [詩織]"), "x
+", None, "2026-11-22T10:00:00+09:00").unwrap();
+        assert_eq!(m.rel, "20-projects/shiori/memory.md");
+        // type: area は、inboxへ逃がさず断る(記事もmemoryも)
+        let area = fm("title: あ
+type: area
+kind: journal
+project: shiori
+tags: [詩織]");
+        assert!(matches!(save_article_with(Layout::V7, &l.0, "b.md", area, "x
+"), Err(StoreError::Invalid(_))));
+        assert!(save_memory_with(Layout::V7, &l.0, fm("title: t
+type: area
+project: shiori
+tags: [詩織]"), "x
+", None, "n").is_err());
+        assert!(!l.0.join("00-inbox").exists() && !l.0.join("20-areas").exists());
+        // Legacyでは、いままでどおり
+        let f = fm("title: あ
+type: area
+kind: journal
+project: shiori
+tags: [詩織]");
+        assert_eq!(save_article(&l.0, "c.md", f, "x
+").unwrap().rel, "20-areas/shiori/journal/c.md");
     }
 
 }
