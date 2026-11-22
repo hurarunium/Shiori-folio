@@ -3140,61 +3140,20 @@ fn resolve_pending_project_blocking(id: String, action: String) -> Result<(), St
         .map_err(|e| e.to_string())
 }
 
-// inboxファイルのfrontmatter内、`review_status:`行を書き換える(無ければ
-// frontmatter終端の直前に追加する)。frontmatter以外の本文には触れない。
-fn rewrite_inbox_review_status(path: &Path, new_status: &str) -> Result<(), String> {
-    let text =
-        std::fs::read_to_string(path).map_err(|e| format!("{}の読み込みに失敗: {e}", path.display()))?;
-    let mut lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
-
-    if lines.first().map(|l| l.trim()) != Some("---") {
-        return Err("frontmatterが見つかりませんでした。".to_string());
-    }
-    let closing_idx = lines
-        .iter()
-        .enumerate()
-        .skip(1)
-        .find(|(_, l)| l.trim() == "---")
-        .map(|(i, _)| i)
-        .ok_or_else(|| "frontmatterの終端が見つかりませんでした。".to_string())?;
-
-    if let Some(status_idx) = (1..closing_idx).find(|&i| lines[i].starts_with("review_status:")) {
-        lines[status_idx] = format!("review_status: {new_status}");
-    } else {
-        lines.insert(closing_idx, format!("review_status: {new_status}"));
-    }
-
-    let mut new_text = lines.join("\n");
-    if text.ends_with('\n') {
-        new_text.push('\n');
-    }
-    tasks::write_atomically(path, &new_text)
-}
-
-// filenameはUI側がlist_pending_itemsで取得した一覧由来の値のみを渡す前提だが、
-// パストラバーサル対策としてファイル名部分のみであること(区切り文字を含まない)を
-// 念のため検証する。
-fn validate_plain_filename(filename: &str) -> Result<(), String> {
-    if filename.is_empty() || filename.contains('/') || filename.contains('\\') || filename == ".." {
-        return Err("不正なファイル名です。".to_string());
-    }
-    Ok(())
-}
-
 #[tauri::command]
 async fn resolve_pending_inbox_item(filename: String, action: String) -> Result<(), String> {
     run_blocking(move || resolve_pending_inbox_item_blocking(filename, action)).await
 }
 
 fn resolve_pending_inbox_item_blocking(filename: String, action: String) -> Result<(), String> {
-    validate_plain_filename(&filename)?;
-    let path = library_root().join("00-inbox").join(&filename);
-
+    // filenameはUI側がlist_pending_itemsで取得した一覧由来の値のみを渡す前提だが、
+    // パストラバーサル対策として、ファイル名の検証はlibrary_store::inboxが行う。
+    let root = library_root();
     if action == "reject" {
-        return std::fs::remove_file(&path).map_err(|e| format!("{filename}の削除に失敗: {e}"));
+        return library_store::inbox::remove(&root, &filename).map_err(|e| e.to_string());
     }
     let status = pending_action_to_status(&action)?;
-    rewrite_inbox_review_status(&path, status)
+    library_store::inbox::set_review_status(&root, &filename, status).map_err(|e| e.to_string())
 }
 
 #[derive(Serialize)]
@@ -3828,9 +3787,6 @@ fn build_memo_guard_context(
     sources_out: &mut Option<Vec<KnowledgeResultDto>>,
 ) -> String {
     let now = chrono::Local::now();
-    let file_stem = format!("memo-{}", now.timestamp());
-    let file_name = format!("{file_stem}.md");
-    let chunk_id = format!("memo-{file_stem}-0");
     // 見出しは検索性のため内容の要点を含む形が望ましいが、自動要約は行わず
     // 本文の先頭部分をそのまま使う(要件通り)。
     let heading: String = content.chars().take(40).collect();
@@ -3843,16 +3799,15 @@ fn build_memo_guard_context(
     // Ver2.0(00-inbox〜90-archive体系)ではメモは「インボックス」に対応するため
     // 00-inboxへ保存する(2026-08-17、旧"memo"カテゴリのままだと図書館UI側の
     // CATEGORY_META(library.ts)に存在せず「未分類」表示になる不整合が発覚)。
-    let memo_dir = library_root().join("00-inbox");
-    let write_result = std::fs::create_dir_all(&memo_dir)
-        .map_err(|e| format!("メモ保存先ディレクトリの作成に失敗: {e}"))
-        .and_then(|_| {
-            std::fs::write(memo_dir.join(&file_name), &markdown)
-                .map_err(|e| format!("メモファイルの書き込みに失敗: {e}"))
-        });
+    // 同じ秒に2回保存しても上書きしないよう、同名があれば連番が付く(library_store::inbox)。
+    let write_result = library_store::inbox::save_memo(&library_root(), &format!("memo-{}", now.timestamp()), &markdown)
+        .map_err(|e| format!("メモファイルの書き込みに失敗: {e}"));
 
     let tool_result = match write_result {
-        Ok(()) => {
+        Ok(file_name) => {
+            // チャンクIDは従来どおり「memo-」+ファイル名(拡張子なし)+「-0」(RAG側の既存データと食い違わせない)
+            let file_stem = file_name.trim_end_matches(".md");
+            let chunk_id = format!("memo-{file_stem}-0");
             match rag_client::add_document(
                 config.rag.port,
                 &chunk_id,
@@ -5470,45 +5425,6 @@ mod tests {
             .is_ok();
         assert!(!still_healthy, "アイドルタイムアウト後も起動したままだった");
         println!("アイドル自動停止OK");
-    }
-
-    // 要確認UIのinboxの書き換えのテスト用。tags.yaml/projects.yamlの書き換えのテストは
-    // library_store(registry)へ移した。
-    fn write_temp_yaml(name: &str, content: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "shiori_test_pending_yaml_{}_{}",
-            name,
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(format!("{name}.yaml"));
-        std::fs::write(&path, content).unwrap();
-        path
-    }
-
-
-    #[test]
-    fn rewrite_inbox_review_status_inserts_when_absent() {
-        let content = "---\ntitle: テスト\nreason: タグが空でした\n---\n\n本文\n";
-        let path = write_temp_yaml("inbox_insert", content).with_extension("md");
-        std::fs::write(&path, content).unwrap();
-        rewrite_inbox_review_status(&path, "deferred").unwrap();
-        let result = std::fs::read_to_string(&path).unwrap();
-        assert!(result.contains("review_status: deferred"));
-        assert!(result.contains("本文"), "本文が保持されていない");
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
-    }
-
-    #[test]
-    fn rewrite_inbox_review_status_replaces_when_present() {
-        let content = "---\ntitle: テスト\nreview_status: deferred\n---\n\n本文\n";
-        let path = write_temp_yaml("inbox_replace", content).with_extension("md");
-        std::fs::write(&path, content).unwrap();
-        rewrite_inbox_review_status(&path, "confirmed").unwrap();
-        let result = std::fs::read_to_string(&path).unwrap();
-        assert!(result.contains("review_status: confirmed"));
-        assert!(!result.contains("review_status: deferred"));
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }
 
