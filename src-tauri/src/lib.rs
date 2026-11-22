@@ -2337,6 +2337,20 @@ fn resolve_library_asset(path: &str) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
+// サーバーの素材(`library/…`)を、手元の一時フォルダに受け取って、そのパスを返す。
+// 置き場は、素材のパスごとに別のフォルダ(同じ名前の別の素材を取り違えない)。開く前に毎回受け取り直す(古い写しを開かない)。
+fn download_asset(c: &shiori_client::Client, path: &str) -> Result<PathBuf, String> {
+    use sha2::{Digest, Sha256};
+    if !path.starts_with("library/") {
+        return Err("library/ の素材だけ開けます。".to_string());
+    }
+    let name = path.rsplit('/').next().filter(|n| !n.is_empty() && !n.starts_with('.')).ok_or("素材の名前が正しくありません。")?;
+    let dir = std::env::temp_dir().join("shiori-assets").join(format!("{:x}", Sha256::digest(path.as_bytes())).chars().take(16).collect::<String>());
+    let dest = dir.join(name);
+    shiori_client::library::download_file(c, path, &dest).map_err(remote::message)?;
+    Ok(dest)
+}
+
 // 既定のアプリで「開く」と、そのまま実行されてしまう拡張子。libraryはMCP経由で
 // 外部AIも読み書きしうるため、素材として置かれた実行形式をワンクリックで
 // 起動できないようにする。これらは「フォルダで表示」のみ許可する。
@@ -2352,7 +2366,11 @@ async fn open_library_asset(app: tauri::AppHandle, path: String) -> Result<(), S
 
 fn open_library_asset_blocking(app: tauri::AppHandle, path: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
-    let target = resolve_library_asset(&path)?;
+    // サーバーに接続しているときは、実体をサーバーから受け取って、手元の一時フォルダで開く(詩織Ver7.0)
+    let target = match remote::client() {
+        Some(c) => download_asset(&c, &path)?,
+        None => resolve_library_asset(&path)?,
+    };
     let ext = target
         .extension()
         .and_then(|e| e.to_str())
@@ -2375,6 +2393,9 @@ async fn reveal_library_asset(app: tauri::AppHandle, path: String) -> Result<(),
 
 fn reveal_library_asset_blocking(app: tauri::AppHandle, path: String) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
+    if remote::client().is_some() {
+        return Err("サーバーに接続しているときは、「フォルダで表示」は使えません(素材はサーバーにあります)。「開く」を使ってください。".to_string());
+    }
     let target = resolve_library_asset(&path)?;
     app.opener()
         .reveal_item_in_dir(&target)
@@ -2926,19 +2947,7 @@ fn get_source_frontmatter_blocking(source_category: String, source: String) -> R
 
 /// ホームの申し送り(詩織Ver3.9。Ver4.1でmemoryの「やること」「申し送り・待ち」を優先)。
 /// memoryから作ったとき(`from_memory`)は`todos`・`notes`を、journalから作ったときは`items`を使う。
-#[derive(Serialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct HandoffDto {
-    title: String,
-    project: String,
-    date: String,
-    source: String,
-    source_category: String,
-    items: Vec<String>,
-    from_memory: bool,
-    todos: Vec<String>,
-    notes: Vec<String>,
-}
+pub use library_store::handoff::Handoff as HandoffDto;
 
 /// 申し送りを探すとき、更新日時の新しい順に読むjournalの数。整理などで古い記事の
 /// 更新日時が変わることがあるため、少し多めに読んでからfrontmatterのdateで選ぶ。
@@ -2951,6 +2960,10 @@ const HANDOFF_CANDIDATES: usize = 40;
 #[tauri::command]
 async fn get_latest_handoff() -> Result<Option<HandoffDto>, String> {
     run_blocking(|| {
+        // サーバーに接続しているときは、サーバーが選んだ申し送りを使う(詩織Ver7.0)
+        if let Some(c) = remote::client() {
+            return remote::decode(shiori_client::library::handoff(&c).map_err(remote::message)?);
+        }
         let config = app_config()?;
         let mut files = rag_client::list_all_library(config.rag.port)?;
 
@@ -3052,6 +3065,15 @@ pub struct StorageSpaceDto {
 #[tauri::command]
 async fn get_portable_storage() -> Result<StorageSpaceDto, String> {
     run_blocking(|| {
+        // サーバーに接続しているときは、サーバー(libraryのあるドライブ)の空き容量を出す
+        if let Some(c) = remote::client() {
+            let v = shiori_client::library::status(&c).map_err(remote::message)?;
+            let (free, total) = (v["storage"]["free_gb"].as_f64(), v["storage"]["total_gb"].as_f64());
+            return match (free, total) {
+                (Some(free_gb), Some(total_gb)) => Ok(StorageSpaceDto { free_gb, total_gb }),
+                _ => Err("サーバーの空き容量を測れませんでした".to_string()),
+            };
+        }
         let root = project_root();
         let gb = 1024.0 * 1024.0 * 1024.0;
         let free = fs4::available_space(&root).map_err(|e| format!("空き容量の取得に失敗: {e}"))?;
