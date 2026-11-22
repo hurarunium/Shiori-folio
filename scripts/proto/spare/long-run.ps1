@@ -68,7 +68,8 @@ while ((Get-Date) -lt $end) {
     } catch { $wOk = 0; $err += 'write:' + (Clean $_.Exception.Message) }
     $wMs = [int]$sw.Elapsed.TotalMilliseconds
 
-    $avail = (Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory).AvailableMBytes
+    # スタンバイの出入りでWMIの呼び出しが取り消される(0x80041032)ことがある。失敗しても測定は続け、空きメモリは空欄にする
+    try { $avail = (Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory).AvailableMBytes } catch { $avail = '' }
     Append-Row ('{0},{1},{2},{3},{4},{5},{6},{7},{8},{9}' -f $t0.ToString('s'), $sOk, $sMs, $wOk, $wMs, (Clean $err), $avail,
         (Mb 'shiori-proto-server'), (Mb 'shiori-rag'), (Mb 'llama-server'))
 
