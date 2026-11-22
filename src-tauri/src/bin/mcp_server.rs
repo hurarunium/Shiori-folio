@@ -86,6 +86,19 @@ fn default_shelf_limit() -> u32 {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct ListDocumentsArgs {
+    /// 一覧にするフォルダのパス(`library/…` または `knowledge/…`)。例: `library/20-projects/shiori/journal`
+    path: String,
+    /// 返す件数の上限(名前の降順=日付の名前なら新しい順)。省略すると20件
+    #[serde(default = "default_list_limit")]
+    limit: u32,
+}
+
+fn default_list_limit() -> u32 {
+    20
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct ReadDocumentArgs {
     /// 読む記事のパス。検索結果の `path` をそのまま渡す(`library/…` または `knowledge/…`)
     path: String,
@@ -357,6 +370,43 @@ impl ShioriLibrary {
         let json = serde_json::to_string_pretty(&results)
             .map_err(|e| McpError::internal_error(format!("結果のJSON化に失敗: {e}"), None))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+    }
+
+    #[tool(
+        description = "フォルダの中のファイルの一覧を返す(名前の降順。日付の名前の日誌なら、新しい順)。直近の日誌を探すときに使い、返ってきたpathをread_documentに渡して読む。読み取り専用"
+    )]
+    async fn list_documents(
+        &self,
+        Parameters(args): Parameters<ListDocumentsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        if let Some(client) = remote() {
+            let listing = client
+                .get(&format!("/api/v1/list?path={}&limit={}", encode_component(&args.path), args.limit))
+                .map_err(relay_error)?;
+            return pretty(&listing);
+        }
+        // 手元(v6.2)の動き
+        let path = args.path.trim_end_matches('/');
+        let (root, rel, prefix) = match path.split_once('/') {
+            Some(("library", rel)) => (library_root(), rel, "library"),
+            Some(("knowledge", rel)) => (shelf_root(), rel, "knowledge"),
+            _ => {
+                return Err(McpError::invalid_params(
+                    "パスは library/… または knowledge/… の形で指定してください",
+                    None,
+                ))
+            }
+        };
+        if !root.is_dir() {
+            return Err(McpError::internal_error("詩織のSSDが接続されていません", None));
+        }
+        let entries = library_store::fsx::list_entries(&root, rel).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        let items: Vec<serde_json::Value> = entries
+            .into_iter()
+            .take(args.limit as usize)
+            .map(|e| serde_json::json!({"name": e.name, "path": format!("{prefix}/{rel}/{}", e.name), "size": e.size, "modified": e.modified}))
+            .collect();
+        pretty(&serde_json::json!({"path": path, "entries": items}))
     }
 
     #[tool(

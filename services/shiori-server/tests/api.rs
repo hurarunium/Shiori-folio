@@ -510,5 +510,25 @@ fn memoryを整理して外した項目は日誌へ自動で記録され長さ�
     assert_eq!(v["removed_recorded_to"]["path"], "library/10-common/journal/2026-11-22.md", "{v}");
 }
 
+#[test]
+fn フォルダの一覧は新しい日付の順で返り件数を絞れる() {
+    let e = Env::new();
+    for (time, body) in [("2026-11-20T10:00:00+09:00", "a"), ("2026-11-21T10:00:00+09:00", "b"), ("2026-11-22T10:00:00+09:00", "c")] {
+        *e.now.lock().unwrap() = at(time);
+        assert_eq!(e.win("POST", "/api/v1/journal/append", Some(json!({"project": "shiori", "content": format!("`{body}.rs` を直した。試験を足して、112件が通った。確認の結果は良好。")}))).0, 200);
+    }
+    let (code, v) = e.win("GET", "/api/v1/list?path=library/20-projects/shiori/journal", None);
+    let names: Vec<&str> = v["entries"].as_array().unwrap().iter().map(|x| x["name"].as_str().unwrap()).collect();
+    assert_eq!((code, names), (200, vec!["2026-11-22.md", "2026-11-21.md", "2026-11-20.md"]));
+    assert_eq!(v["entries"][0]["path"], "library/20-projects/shiori/journal/2026-11-22.md", "read_documentにそのまま渡せる");
+    let (_, v) = e.win("GET", "/api/v1/list?path=library/20-projects/shiori/journal&limit=1", None);
+    assert_eq!(v["entries"].as_array().unwrap().len(), 1);
+    // フォルダが無ければ空(エラーにしない)。不正なパスは断る。認証が要る
+    assert_eq!(e.win("GET", "/api/v1/list?path=library/20-projects/無い/journal", None).1["entries"], json!([]));
+    assert_eq!(e.win("GET", "/api/v1/list?path=library/..%2Fx", None).0, 422);
+    assert_eq!(e.win("GET", "/api/v1/list?path=etc", None).0, 400);
+    assert_eq!(e.call("GET", "/api/v1/list?path=library/20-projects", Some("wrong-token"), None).0, 401);
+}
+
 #[allow(dead_code)]
 fn _unused(_: &Path) {}

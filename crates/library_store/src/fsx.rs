@@ -185,6 +185,46 @@ pub fn list_names(root: &Path, rel_dir: &str) -> Result<Vec<String>, StoreError>
     }
 }
 
+/// フォルダの中のファイルの一覧の1件。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Entry {
+    pub name: String,
+    pub size: u64,
+    /// 最終更新(UNIX時刻の秒)
+    pub modified: i64,
+}
+
+/// フォルダの中の**ファイル**の一覧(名前の降順。日付の名前なら、新しい順)。
+/// 隠しファイル(`.`始まり、macOSの`._`)・一時ファイル(`.tmp`)・サブフォルダは含めない。フォルダが無ければ空。
+pub fn list_entries(root: &Path, rel_dir: &str) -> Result<Vec<Entry>, StoreError> {
+    let dir = resolve(root, rel_dir)?;
+    let rd = match std::fs::read_dir(&dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(io_err("一覧の取得", &dir, e)),
+    };
+    let mut out = Vec::new();
+    for e in rd.filter_map(|e| e.ok()) {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') || name.ends_with(".tmp") {
+            continue;
+        }
+        let Ok(meta) = e.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        out.push(Entry { name, size: meta.len(), modified });
+    }
+    out.sort_by(|a, b| b.name.cmp(&a.name));
+    Ok(out)
+}
+
 /// 消す。読んだ版を渡したときは、版が一致するときだけ消す。
 pub fn remove(root: &Path, rel: &str, expect_rev: Option<&str>) -> Result<(), StoreError> {
     let path = resolve(root, rel)?;
@@ -332,4 +372,21 @@ mod tests {
         assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 1);
         assert_eq!(results.iter().filter(|r| matches!(r, Err(StoreError::Conflict { .. }))).count(), 7);
     }
+
+    #[test]
+    fn 一覧は名前の降順で隠しファイルとフォルダを含めない() {
+        let d = Dir::new("list");
+        std::fs::create_dir_all(d.0.join("j")).unwrap();
+        // 書き込みの口は `._` を断るので、隠しファイルは、直接作る
+        for n in ["2026-11-20.md", "2026-11-22.md", "2026-11-21.md", ".hidden.md", "._a.md", "x.md.tmp"] {
+            std::fs::write(d.0.join("j").join(n), b"x").unwrap();
+        }
+        std::fs::create_dir_all(d.0.join("j/sub")).unwrap();
+        let names: Vec<String> = list_entries(&d.0, "j").unwrap().into_iter().map(|e| e.name).collect();
+        assert_eq!(names, vec!["2026-11-22.md", "2026-11-21.md", "2026-11-20.md"]);
+        assert_eq!(list_entries(&d.0, "j").unwrap()[0].size, 1);
+        assert!(list_entries(&d.0, "無い").unwrap().is_empty(), "フォルダが無ければ空");
+        assert!(matches!(list_entries(&d.0, "../x"), Err(StoreError::Invalid(_))));
+    }
+
 }

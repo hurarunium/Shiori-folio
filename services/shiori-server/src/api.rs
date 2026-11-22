@@ -195,6 +195,7 @@ fn route(app: &App, method: &Method, path: &str, url: &str, body: &str, device: 
             }),
         ),
         (Method::Get, "/api/v1/doc") => doc_get(app, url),
+        (Method::Get, "/api/v1/list") => doc_list(app, url),
         (Method::Put, "/api/v1/doc") => doc_put(app, body),
         (Method::Delete, "/api/v1/doc") => doc_delete(app, url),
         (Method::Post, "/api/v1/save") => save(app, body, device),
@@ -220,6 +221,26 @@ fn route(app: &App, method: &Method, path: &str, url: &str, body: &str, device: 
             (200, json!(v))
         }
         _ => err(404, "Not Found"),
+    }
+}
+
+/// フォルダの中のファイルの一覧(`GET /api/v1/list?path=library/20-projects/shiori/journal[&limit=N]`)。
+/// 名前の降順(日付の名前なら、新しい順)。フォルダが無ければ空。直近の日誌を探すときなどに使う。
+fn doc_list(app: &App, url: &str) -> Reply {
+    let Some(p) = query_param(url, "path") else { return err(400, "path が必要") };
+    let p = p.trim_end_matches('/').to_string();
+    let Some((area, rel)) = split_area(&p) else { return err(400, "パスは library/… knowledge/… tasks/… の形") };
+    let limit = query_param(url, "limit").and_then(|s| s.parse::<usize>().ok()).unwrap_or(100).min(1000);
+    match fsx::list_entries(app.root_of(area), rel) {
+        Ok(entries) => {
+            let items: Vec<Value> = entries
+                .into_iter()
+                .take(limit)
+                .map(|e| json!({"name": e.name, "path": format!("{p}/{}", e.name), "size": e.size, "modified": e.modified}))
+                .collect();
+            (200, json!({"path": p, "entries": items}))
+        }
+        Err(e) => store_err(e),
     }
 }
 

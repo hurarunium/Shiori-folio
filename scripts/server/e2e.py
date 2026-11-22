@@ -207,6 +207,13 @@ def run_all(S, P, exes, token, port):
         body = call(3, "read_document", {"path": "library/20-projects/shiori/resource/a.md"})
         check("MCP: read_document がサーバーの正本を読む", "本文" in body, body[:60])
         check("MCP: 置き場の外のパスは断られる", call(4, "read_document", {"path": "library/../x"}).startswith("ERROR"))
+        listing = json.loads(call(9, "list_documents", {"path": "library/20-projects/shiori/journal"}))
+        entries = listing["entries"]
+        check("MCP: list_documents が、日誌の一覧を新しい順に返す", "list_documents" in tools and len(entries) >= 1
+              and entries == sorted(entries, key=lambda e: e["name"], reverse=True), listing)
+        newest = call(10, "read_document", {"path": entries[0]["path"]}) if entries else ""
+        check("MCP: 一覧のpathを、そのままread_documentに渡して読める", "## " in newest and "昼に実装した。" in newest, newest[:80])
+        check("MCP: 無いフォルダの一覧は空になる", json.loads(call(11, "list_documents", {"path": "library/20-projects/無い/journal"}))["entries"] == [])
         check("MCP: get_context_profile が読める", "プロファイル" in call(5, "get_context_profile", {}))
         # RAGは動かしていないので、検索は理由つきの誤りになる(つながらない)
         check("MCP: 検索はRAGが無ければ誤りで返る(中継している)", call(6, "search_library", {"query": "詩織"}).startswith("ERROR"))
