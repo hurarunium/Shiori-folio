@@ -1,0 +1,8 @@
+[package]
+name = "library_store"
+version = "0.1.0"
+edition = "2021"
+description = "詩織のlibraryへの書き込みを1か所に集める部品(Tauriに依存しない。アプリ・CLI・サーバーが共有する)"
+
+[dependencies]
+sha2 = "0.10"
