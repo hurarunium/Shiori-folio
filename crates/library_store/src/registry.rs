@@ -14,7 +14,7 @@ pub const PROJECTS_YAML: &str = "_system/projects.yaml";
 pub const TAGS_YAML: &str = "_system/tags.yaml";
 
 /// 読んでから書くまでに、別の書き込みが入ったときの、やり直しの最大回数。
-const MAX_RETRY: usize = 5;
+const MAX_RETRY: usize = 50;
 
 #[derive(Debug, Deserialize)]
 struct ProjectsFile {
@@ -148,14 +148,18 @@ fn update(
     rel: &str,
     mut change: impl FnMut(&str) -> Result<Option<String>, StoreError>,
 ) -> Result<bool, StoreError> {
-    for _ in 0..MAX_RETRY {
+    for attempt in 0..MAX_RETRY {
         let (text, rev) = read_text(root, rel)?;
         let Some(new_text) = change(&text)? else {
             return Ok(false);
         };
         match fsx::write(root, rel, new_text.as_bytes(), Cond::Overwrite { expect_rev: rev }) {
             Ok(_) => return Ok(true),
-            Err(StoreError::Conflict { .. }) => continue,
+            Err(StoreError::Conflict { .. }) => {
+                // 別の書き込みと重なった。少し待って、読み直す
+                std::thread::sleep(std::time::Duration::from_millis(1 + (attempt as u64 % 8)));
+                continue;
+            }
             Err(e) => return Err(e),
         }
     }
@@ -329,4 +333,29 @@ mod tests {
         assert_eq!(d.tags().matches("canonical: 未知").count(), 1);
         assert!(d.tags().ends_with("  - canonical: 未知\n    aliases: []\n    status: pending\n"));
     }
+
+    #[test]
+    fn 同時に別々のタグを登録しても全部残る() {
+        let d = Dir::new("tags-race", SAMPLE_TAGS, SAMPLE_PROJECTS);
+        let root = std::sync::Arc::new(d.0.clone());
+        let handles: Vec<_> = (0..12)
+            .map(|i| {
+                let root = root.clone();
+                std::thread::spawn(move || {
+                    let mut pending = Vec::new();
+                    normalize_tag(&root, &format!("並行{i}"), &mut pending)
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap().unwrap();
+        }
+        let result = d.tags();
+        for i in 0..12 {
+            assert_eq!(result.matches(&format!("canonical: 並行{i}
+")).count(), 1, "並行{i}: {result}");
+        }
+        assert!(result.starts_with("# ヘッダーコメント1行目"), "コメントも残る");
+    }
+
 }

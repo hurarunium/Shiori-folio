@@ -10,7 +10,7 @@ pub const INBOX_DIR: &str = "00-inbox";
 const MAX_MEMO_SUFFIX: usize = 1000;
 
 /// 読んでから書くまでに、別の書き込みが入ったときの、やり直しの最大回数。
-const MAX_RETRY: usize = 5;
+const MAX_RETRY: usize = 50;
 
 /// inbox直下のファイル名だけを許す(区切り・`..`・空は断る)。
 fn rel_of(filename: &str) -> Result<String, StoreError> {
@@ -66,13 +66,16 @@ pub fn set_review_status_text(text: &str, new_status: &str) -> Result<String, St
 /// inboxのファイルの `review_status` を書き換える(要確認UIの確定・保留)。
 pub fn set_review_status(root: &Path, filename: &str, new_status: &str) -> Result<(), StoreError> {
     let rel = rel_of(filename)?;
-    for _ in 0..MAX_RETRY {
+    for attempt in 0..MAX_RETRY {
         let (bytes, rev) = fsx::read(root, &rel)?;
         let text = String::from_utf8(bytes).map_err(|_| StoreError::Invalid(format!("{rel}がUTF-8ではありません")))?;
         let new_text = set_review_status_text(&text, new_status)?;
         match fsx::write(root, &rel, new_text.as_bytes(), Cond::Overwrite { expect_rev: rev }) {
             Ok(_) => return Ok(()),
-            Err(StoreError::Conflict { .. }) => continue,
+            Err(StoreError::Conflict { .. }) => {
+                std::thread::sleep(std::time::Duration::from_millis(1 + (attempt as u64 % 8)));
+                continue;
+            }
             Err(e) => return Err(e),
         }
     }
