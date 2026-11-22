@@ -45,9 +45,17 @@ fn search_with_mode(
     top_k: u32,
     mode: Option<&str>,
 ) -> Result<Vec<SearchResultItem>, String> {
-    let url = format!("http://127.0.0.1:{port}/search");
     let body = SearchRequest { query, top_k, mode };
 
+    // サーバーに接続しているときは、サーバーの検索(`/api/v1/search`)を使う。手元のRAGは見ない(詩織Ver7.0)。
+    if let Some(c) = crate::remote::client() {
+        let value = c
+            .post("/api/v1/search", &serde_json::to_value(&body).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        return serde_json::from_value(value).map_err(|e| format!("RAG応答の解析に失敗: {e}"));
+    }
+
+    let url = format!("http://127.0.0.1:{port}/search");
     ureq::post(&url)
         .timeout(Duration::from_secs(30))
         .send_json(&body)

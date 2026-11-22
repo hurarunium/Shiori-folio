@@ -277,6 +277,12 @@ enum AppMode {
 
 const EXTERNAL_MODE_MESSAGE: &str = "外部AIモードでは、詩織との会話は使えません。ヘッダーで会話モードに切り替えてください。";
 
+/// サーバーが担うサービス(埋め込み・RAG)を、手元では起動しなかった印。
+fn server_skipped_status(name: &str, port: u16) -> ServiceStatus {
+    // LLMを手元で起動しないとき(`llm_skipped_status`)と同じ形にする(画面は、skippedを見て除く)
+    ServiceStatus { skipped: true, name: name.into(), port, started: false, healthy: false, error: None }
+}
+
 fn llm_skipped_status(config: &AppConfig) -> ServiceStatus {
     ServiceStatus {
         name: "llm".into(),
@@ -830,7 +836,14 @@ async fn start_backend_services_impl(
     let embedding_app = app.cloned();
     let embedding_root = root.clone();
     let embedding_config = config.clone();
+    // サーバーに接続しているときは、検索用の埋め込みもRAGもサーバーが持つので、手元では起動しない(詩織Ver7.0)。
+    let use_server = remote::client().is_some();
     let embedding_task = tauri::async_runtime::spawn_blocking(move || {
+        if use_server {
+            let status = server_skipped_status("embedding", embedding_config.embedding.port);
+            emit_service_status(embedding_app.as_ref(), &status);
+            return (status, None);
+        }
         start_embedding_service(&embedding_root, &embedding_config, embedding_app.as_ref())
     });
 
@@ -857,9 +870,11 @@ async fn start_backend_services_impl(
     // 結果リストにも含めない)。
     let rag_needs_start = {
         let procs = state.0.lock().map_err(|e| e.to_string())?;
-        procs.rag.is_none()
+        procs.rag.is_none() && !use_server
     };
-    let rag_status = if rag_needs_start {
+    let rag_status = if use_server {
+        Some(server_skipped_status("rag", config.rag.port))
+    } else if rag_needs_start {
         let rag_app = app.cloned();
         let rag_root = root.clone();
         let rag_config = config.clone();
@@ -3895,10 +3910,27 @@ fn build_memo_guard_context(
     // 00-inboxへ保存する(2026-08-17、旧"memo"カテゴリのままだと図書館UI側の
     // CATEGORY_META(library.ts)に存在せず「未分類」表示になる不整合が発覚)。
     // 同じ秒に2回保存しても上書きしないよう、同名があれば連番が付く(library_store::inbox)。
-    let write_result = library_store::inbox::save_memo(&library_root(), &format!("memo-{}", now.timestamp()), &markdown)
-        .map_err(|e| format!("メモファイルの書き込みに失敗: {e}"));
+    // サーバーに接続しているときは、サーバーの受信箱に作る(索引へも、サーバーが入れる)。
+    let remote_client = remote::client();
+    let stem = format!("memo-{}", now.timestamp());
+    let write_result = match &remote_client {
+        Some(c) => shiori_client::library::save_inbox_memo(c, &stem, &markdown).map_err(|e| format!("メモファイルの書き込みに失敗: {e}")),
+        None => library_store::inbox::save_memo(&library_root(), &stem, &markdown)
+            .map_err(|e| format!("メモファイルの書き込みに失敗: {e}")),
+    };
 
     let tool_result = match write_result {
+        Ok(file_name) if remote_client.is_some() => {
+            let chunk_id = format!("memo-{}-0", file_name.trim_end_matches(".md"));
+            *sources_out = Some(vec![KnowledgeResultDto {
+                id: chunk_id,
+                text: content.to_string(),
+                source: file_name,
+                heading,
+                source_category: "00-inbox".to_string(),
+            }]);
+            format!("「{content}」という内容をメモとして保存しました。")
+        }
         Ok(file_name) => {
             // チャンクIDは従来どおり「memo-」+ファイル名(拡張子なし)+「-0」(RAG側の既存データと食い違わせない)
             let file_stem = file_name.trim_end_matches(".md");
