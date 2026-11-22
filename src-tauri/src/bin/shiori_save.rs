@@ -23,32 +23,10 @@ use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use library_store::fsx;
 use library_store::notes::{self, split_frontmatter, Frontmatter};
 use shiori_folio_lib::shiori_log;
 use shiori_folio_lib::{library_root, load_search_backend_config, project_root, rag_client, shelf_root};
-
-// 詩織Ver4.1(共通記憶MD、2026-10-10)。kind: memoryは「いま有効な状態・やること・
-// 申し送り」を持つ丸ごと上書き型の記事で、通常記事のように連番を付けて積み上げず、
-// 保存先のファイル名も固定する(プロジェクトにつき1ファイル)。
-const MEMORY_KIND: &str = "memory";
-const MEMORY_FILE_NAME: &str = "memory.md";
-const MEMORY_GLOBAL_FILE_NAME: &str = "memory-global.md";
-// 上書き前の旧版を退避する先(library/_system/配下は索引から除外される)。
-const MEMORY_HISTORY_DIR: &str = "memory-history";
-const MEMORY_HISTORY_GENERATIONS: usize = 3;
-// 退避ファイル名でproject idと区別するための、全体用memoryの識別子。
-const MEMORY_GLOBAL_KEY: &str = "_global";
-// 上限(本文だけ。frontmatterは数えない)。超えても保存は止めず、警告で整理を促す。
-// frontmatterを外すのは、`related` が記録の増えるほど伸び、整理しても減らせないため(2026-10-24、ふらる)。
-const MEMORY_MAX_LINES: usize = 200;
-const MEMORY_MAX_CHARS: usize = 6000;
-
-/// memoryの本文の行数と字数が上限を超えていれば、その行数と字数を返す。
-fn memory_over_limit(body: &str) -> Option<(usize, usize)> {
-    let lines = body.lines().count();
-    let chars = body.chars().count();
-    (lines > MEMORY_MAX_LINES || chars > MEMORY_MAX_CHARS).then_some((lines, chars))
-}
 
 fn main() -> Result<()> {
     let root = project_root();
@@ -140,7 +118,7 @@ fn run() -> Result<()> {
 
     // 共通記憶MDは、固定の保存先への丸ごと上書き・競合検知・旧版退避という
     // 通常記事と異なる流れを持つため、専用の経路で処理する。
-    if fm.sub_kind.as_deref() == Some(MEMORY_KIND) {
+    if fm.sub_kind.as_deref() == Some(notes::MEMORY_KIND) {
         return save_memory(&root, &source, fm, &body, expect_updated);
     }
     if expect_updated.is_some() {
@@ -203,68 +181,6 @@ fn reindex_saved_file(root: &Path, dest_path: &Path) {
     }
 }
 
-// ---- 共通記憶MD(詩織Ver4.1) ----
-
-// memoryの保存先と、退避ファイル名に使う識別子(project id、全体用は"_global")を返す。
-// 副作用なし(projects.yamlへの登録は、競合検知を通ってから行う)。
-fn memory_target(root: &Path, fm: &Frontmatter) -> Result<(PathBuf, String)> {
-    let project = fm.project.as_deref().map(str::trim).filter(|p| !p.is_empty());
-    match fm.kind.as_deref() {
-        Some(t @ ("project" | "area")) => {
-            let p = project.ok_or_else(|| {
-                anyhow!("typeがproject/areaのmemoryにはprojectが必要です(保存先が決まりません)")
-            })?;
-            if p.contains(['/', '\\']) || p.contains("..") {
-                bail!("projectにパス区切りや..は使えません: {p}");
-            }
-            let top = if t == "project" { "10-projects" } else { "20-areas" };
-            Ok((root.join(top).join(p).join(MEMORY_FILE_NAME), p.to_string()))
-        }
-        // 全体用。projectが付いていても無視する。
-        Some("profile") => Ok((
-            root.join("40-profile").join(MEMORY_GLOBAL_FILE_NAME),
-            MEMORY_GLOBAL_KEY.to_string(),
-        )),
-        other => bail!("memoryのtypeが不正です(値: {other:?}, 許可値: project/area/profile)"),
-    }
-}
-
-// 既存memoryの版を表す値。updatedを持たない初期の手書き版はdateで代用する。
-fn memory_version(fm: &Frontmatter) -> Result<String> {
-    fm.updated
-        .as_deref()
-        .or(fm.date.as_deref())
-        .map(|v| v.trim().to_string())
-        .ok_or_else(|| anyhow!("既存のmemoryにupdatedもdateもありません。手作業でfrontmatterを直してください"))
-}
-
-// 退避ファイル名。ISO8601の':'はWindowsのファイル名に使えないため'-'へ置き換える。
-fn memory_history_file_name(key: &str, version: &str) -> String {
-    format!("{key}-{MEMORY_KIND}-{}.md", version.replace(':', "-"))
-}
-
-// keyの退避ファイルを新しい順に並べ、MEMORY_HISTORY_GENERATIONSを超えた古いものを消す。
-// 版はISO8601なので、同じ端末で作られた名前は辞書順がそのまま時系列になる。
-fn prune_memory_history(history_dir: &Path, key: &str) -> Result<()> {
-    let prefix = format!("{key}-{MEMORY_KIND}-");
-    let mut names: Vec<String> = std::fs::read_dir(history_dir)
-        .with_context(|| format!("{}の読み込みに失敗", history_dir.display()))?
-        .filter_map(|e| e.ok())
-        .map(|e| e.file_name().to_string_lossy().to_string())
-        .filter(|n| {
-            // 版(年の数字)が続くものだけを対象にし、別projectの退避を巻き込まない。
-            n.strip_prefix(&prefix)
-                .is_some_and(|rest| n.ends_with(".md") && rest.starts_with(|c: char| c.is_ascii_digit()))
-        })
-        .collect();
-    names.sort_unstable_by(|a, b| b.cmp(a));
-    for old in names.iter().skip(MEMORY_HISTORY_GENERATIONS) {
-        std::fs::remove_file(history_dir.join(old))
-            .with_context(|| format!("古い退避{old}の削除に失敗"))?;
-    }
-    Ok(())
-}
-
 // 一時ファイルに書いてからリネームで置き換える。書き込み途中で止まっても、
 // 保存先に中途半端なファイルが残らない。
 fn write_atomically(dest: &Path, content: &str) -> Result<()> {
@@ -284,28 +200,20 @@ fn write_atomically(dest: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
-// 共通記憶MDを保存する。通常記事と違い、不備はinboxへ逃がさずエラーにする
-// (固定の保存先に置く前提のため、別の場所へ置くと「プロジェクトのmemory」でなくなる)。
-//
-// 既存のmemoryを更新するときは、読んだ時点のupdatedを--expect-updatedで渡す必要がある。
-// 現在のupdated(またはdate)と違えば、他のセッションが先に更新したとみなして
-// 何も書かずに終了する(ロックは使わない。同時保存しない運用が前提)。
+// 共通記憶MDを保存する。規則(保存先・競合検知・旧版の退避・上限の警告)と書き込みは
+// library_store::notes::save_memory。ここは、元ファイルとの同一確認、元ファイルの削除、
+// 索引への反映、結果の出力だけを担う。
 fn save_memory(
     root: &Path,
     source: &Path,
-    mut fm: Frontmatter,
+    fm: Frontmatter,
     body: &str,
     expect_updated: Option<String>,
 ) -> Result<()> {
-    if fm.title.as_deref().map(str::trim).unwrap_or("").is_empty() {
-        bail!("titleが空です");
-    }
-    if fm.tags.is_empty() {
-        bail!("tagsが空です");
-    }
-    let (dest, key) = memory_target(root, &fm)?;
     // 保存先のmemoryそのものを渡されると、新しい内容を書いた直後に元ファイルの削除で消える
     // (save_shelfと同じ確認。何かを書く前に断る)。
+    let (rel, _) = notes::memory_target(&fm)?;
+    let dest = fsx::resolve(root, &rel)?;
     if is_same_file(source, &dest) {
         bail!(
             "保存先のmemoryそのものは渡せません。作業用の場所へコピーして書き直してから渡してください: {}",
@@ -313,103 +221,35 @@ fn save_memory(
         );
     }
     let now = chrono::Local::now().to_rfc3339();
+    let saved = notes::save_memory(root, fm, body, expect_updated.as_deref(), &now)?;
 
-    let old_text = if dest.is_file() {
-        Some(
-            std::fs::read_to_string(&dest)
-                .with_context(|| format!("{}の読み込みに失敗", dest.display()))?,
-        )
-    } else {
-        None
-    };
-    let old_version = match (&old_text, &expect_updated) {
-        (Some(text), Some(expected)) => {
-            let (old_fm, _) = split_frontmatter(text)?;
-            let current = memory_version(&old_fm)?;
-            if current != expected.trim() {
-                bail!(
-                    "競合: 渡されたupdated({})が現在のmemoryと一致しません。他のセッションが先に更新した可能性があります。何も書き込んでいません。memoryを読み直し、その内容に今回の変更を反映したうえで、読み直した時点のupdatedを--expect-updatedに渡して再度保存してください: {}",
-                    expected.trim(),
-                    dest.display()
-                );
-            }
-            // dateは作成日時のまま引き継ぐ。
-            fm.date = old_fm.date.or(Some(now.clone()));
-            Some(current)
-        }
-        (Some(_), None) => bail!(
-            "既存のmemoryの更新には--expect-updated <読んだ時点のupdated>が必要です。memoryを読み、そのupdatedを渡してください: {}",
-            dest.display()
-        ),
-        (None, Some(_)) => bail!(
-            "memoryがまだ存在しません。--expect-updatedを付けずに新規作成してください: {}",
-            dest.display()
-        ),
-        (None, None) => {
-            fm.date = Some(now.clone());
-            None
-        }
-    };
-    fm.updated = Some(now);
-
-    // ここから先は書き込みを伴う。競合検知を通った後にだけ、タグとprojectを登録する。
-    let mut newly_pending_tags = Vec::new();
-    fm.tags = fm
-        .tags
-        .iter()
-        .map(|raw| normalize_tag(root, raw, &mut newly_pending_tags))
-        .collect::<Result<Vec<_>>>()?;
-    if matches!(fm.kind.as_deref(), Some("project" | "area")) {
-        ensure_project_registered(root, &key)?;
-    }
-    // 保存先(40-profile/など)がまだ無い場合に備える。
-    let dest_dir = dest.parent().ok_or_else(|| anyhow!("保存先の親フォルダの取得に失敗"))?;
-    std::fs::create_dir_all(dest_dir)
-        .with_context(|| format!("{}の作成に失敗", dest_dir.display()))?;
-
-    // 旧版の退避が済んでから上書きする(退避に失敗したら上書きしない)。
-    let mut history_file = None;
-    if let (Some(text), Some(version)) = (&old_text, &old_version) {
-        let history_dir = root.join("_system").join(MEMORY_HISTORY_DIR);
-        std::fs::create_dir_all(&history_dir)
-            .with_context(|| format!("{}の作成に失敗", history_dir.display()))?;
-        let path = history_dir.join(memory_history_file_name(&key, version));
-        std::fs::write(&path, text)
-            .with_context(|| format!("旧版の退避に失敗: {}", path.display()))?;
-        history_file = Some(path);
-    }
-
-    let frontmatter_yaml = serde_yaml::to_string(&fm).context("frontmatterのYAML化に失敗")?;
-    let new_content = format!("---\n{frontmatter_yaml}---\n{body}");
-    write_atomically(&dest, &new_content)?;
     std::fs::remove_file(source)
         .with_context(|| format!("移動元{}の削除に失敗", source.display()))?;
-    if history_file.is_some() {
-        let history_dir = root.join("_system").join(MEMORY_HISTORY_DIR);
-        if let Err(e) = prune_memory_history(&history_dir, &key) {
-            eprintln!("警告: 古い退避の整理に失敗しました({e:#})。");
-            shiori_log::warn("SAVE", "古い退避の整理に失敗した", &[("理由", &format!("{e:#}"))]);
-        }
+    if let Some(e) = &saved.prune_error {
+        eprintln!("警告: 古い退避の整理に失敗しました({e})。");
+        shiori_log::warn("SAVE", "古い退避の整理に失敗した", &[("理由", e)]);
     }
 
     let mut warnings = Vec::new();
-    if let Some((lines, chars)) = memory_over_limit(&body) {
-        let w = format!(
-            "memoryが上限を超えています(本文{lines}行・{chars}字。上限は本文{MEMORY_MAX_LINES}行・{MEMORY_MAX_CHARS}字)。完了した項目を消し、履歴が要る内容はjournal/decisionへ移して整理してください"
-        );
+    if let Some((lines, chars)) = saved.over_limit {
+        let w = notes::over_limit_warning(lines, chars);
         eprintln!("警告: {w}");
         shiori_log::warn("SAVE", "memoryが上限を超えた", &[("行", &lines), ("字", &chars)]);
         warnings.push(w);
     }
 
-    reindex_saved_file(root, &dest);
+    reindex_saved_file(root, &saved.path);
 
+    let history_file = match &saved.history_rel {
+        Some(h) => Some(fsx::resolve(root, h)?.display().to_string()),
+        None => None,
+    };
     let result = serde_json::json!({
-        "destination": dest.display().to_string(),
-        "updated": fm.updated,
-        "history_file": history_file.map(|p| p.display().to_string()),
+        "destination": saved.path.display().to_string(),
+        "updated": saved.updated,
+        "history_file": history_file,
         "inbox_reason": serde_json::Value::Null,
-        "newly_pending_tags": newly_pending_tags,
+        "newly_pending_tags": saved.newly_pending_tags,
         "warnings": warnings,
     });
     print_result("memory", &result)?;
@@ -821,20 +661,6 @@ mod tests {
     }
 
     #[test]
-    fn memoryの保存先はtypeごとに固定される() {
-        let root = Path::new("lib");
-        let (p, key) = memory_target(root, &fm_of("area", Some("shiori"))).unwrap();
-        assert_eq!(p, root.join("20-areas").join("shiori").join("memory.md"));
-        assert_eq!(key, "shiori");
-        let (p, _) = memory_target(root, &fm_of("project", Some("tanker"))).unwrap();
-        assert_eq!(p, root.join("10-projects").join("tanker").join("memory.md"));
-        // 全体用はprojectがあっても無視する。
-        let (p, key) = memory_target(root, &fm_of("profile", Some("shiori"))).unwrap();
-        assert_eq!(p, root.join("40-profile").join("memory-global.md"));
-        assert_eq!(key, MEMORY_GLOBAL_KEY);
-    }
-
-    #[test]
     fn 保存先のmemoryそのものを渡すと何も変えずに断る() {
         let root = std::env::temp_dir().join(format!("shiori-save-memself-{}", std::process::id()));
         let dest = root.join("20-areas").join("shiori").join("memory.md");
@@ -857,55 +683,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), original);
         assert!(!root.join("_system").exists(), "旧版の退避も行わない");
         std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn memoryの保存先が決まらない入力は拒否する() {
-        let root = Path::new("lib");
-        assert!(memory_target(root, &fm_of("area", None)).is_err());
-        assert!(memory_target(root, &fm_of("resource", None)).is_err());
-        assert!(memory_target(root, &fm_of("area", Some("../x"))).is_err());
-        assert!(memory_target(root, &fm_of("area", Some("a/b"))).is_err());
-    }
-
-    #[test]
-    fn 退避ファイル名にコロンを含めない() {
-        let name = memory_history_file_name("shiori", "2026-10-10T15:31:52.928312+09:00");
-        assert_eq!(name, "shiori-memory-2026-10-10T15-31-52.928312+09-00.md");
-    }
-
-    #[test]
-    fn memoryの上限は本文だけで数える() {
-        assert_eq!(memory_over_limit(&"あ".repeat(MEMORY_MAX_CHARS)), None);
-        assert_eq!(memory_over_limit(&"あ".repeat(MEMORY_MAX_CHARS + 1)), Some((1, MEMORY_MAX_CHARS + 1)));
-        assert_eq!(memory_over_limit(&"行\n".repeat(MEMORY_MAX_LINES + 1)), Some((MEMORY_MAX_LINES + 1, (MEMORY_MAX_LINES + 1) * 2)));
-    }
-
-    #[test]
-    fn 退避は新しい3世代だけ残し別projectの退避は触らない() {
-        let dir = std::env::temp_dir().join(format!("shiori-save-history-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        for day in 1..=5 {
-            let v = format!("2026-10-0{day}T10:00:00+09:00");
-            std::fs::write(dir.join(memory_history_file_name("shiori", &v)), "x").unwrap();
-        }
-        let other = dir.join(memory_history_file_name("shiori-memory-x", "2026-10-01T10:00:00+09:00"));
-        std::fs::write(&other, "x").unwrap();
-        let tanker = dir.join(memory_history_file_name("tanker", "2026-10-01T10:00:00+09:00"));
-        std::fs::write(&tanker, "x").unwrap();
-
-        prune_memory_history(&dir, "shiori").unwrap();
-
-        let mut left: Vec<String> = std::fs::read_dir(&dir)
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
-            .filter(|n| n.starts_with("shiori-memory-2026"))
-            .collect();
-        left.sort();
-        assert_eq!(left.len(), 3);
-        assert!(left[0].contains("2026-10-03"), "古い2世代が消え、03〜05が残る: {left:?}");
-        assert!(other.exists() && tanker.exists());
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn shelf_fm(yaml: &str) -> Frontmatter {
@@ -987,13 +764,4 @@ mod tests {
         assert!(shelf_file_name(Path::new("x/.math-a.md")).is_err());
     }
 
-    #[test]
-    fn 既存memoryの版はupdatedを優先しなければdateを使う() {
-        let mut fm = Frontmatter::default();
-        assert!(memory_version(&fm).is_err());
-        fm.date = Some("D".to_string());
-        assert_eq!(memory_version(&fm).unwrap(), "D");
-        fm.updated = Some("U".to_string());
-        assert_eq!(memory_version(&fm).unwrap(), "U");
-    }
 }
