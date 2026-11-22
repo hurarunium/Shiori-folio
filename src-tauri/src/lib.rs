@@ -3044,8 +3044,16 @@ async fn get_portable_storage() -> Result<StorageSpaceDto, String> {
 #[tauri::command]
 async fn list_library_projects() -> Result<Vec<String>, String> {
     run_blocking(|| {
-        let path = library_root().join("_system").join("projects.yaml");
-        let text = std::fs::read_to_string(&path).map_err(|e| format!("projects.yamlの読み込みに失敗: {e}"))?;
+        let text = match remote::client() {
+            Some(c) => {
+                let v = shiori_client::library::doc(&c, "library/_system/projects.yaml").map_err(remote::message)?;
+                v["content"].as_str().unwrap_or_default().to_string()
+            }
+            None => {
+                let path = library_root().join("_system").join("projects.yaml");
+                std::fs::read_to_string(&path).map_err(|e| format!("projects.yamlの読み込みに失敗: {e}"))?
+            }
+        };
         let file: YamlProjectsFile =
             serde_yaml::from_str(&text).map_err(|e| format!("projects.yamlの解析に失敗: {e}"))?;
         Ok(file.projects.into_iter().map(|p| p.id).collect())
@@ -3066,74 +3074,7 @@ struct YamlProjectsFile {
     projects: Vec<YamlProjectEntry>,
 }
 
-#[derive(Deserialize)]
-struct YamlTagEntry {
-    canonical: String,
-    #[serde(default)]
-    status: String,
-}
-
-#[derive(Deserialize)]
-struct YamlTagsFile {
-    #[serde(default)]
-    tags: Vec<YamlTagEntry>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PendingTagDto {
-    canonical: String,
-    status: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PendingProjectDto {
-    id: String,
-    status: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PendingInboxItemDto {
-    filename: String,
-    title: Option<String>,
-    reason: Option<String>,
-    review_status: Option<String>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PendingItemsDto {
-    tags: Vec<PendingTagDto>,
-    projects: Vec<PendingProjectDto>,
-    inbox: Vec<PendingInboxItemDto>,
-}
-
-// inboxファイルのfrontmatterから、要確認UIの表示に必要な最小限の3項目
-// (title/reason/review_status)だけを読み取る。他のfrontmatterフィールド
-// (type/tags/project/author等)は要確認UIの範囲外(人間が直接編集する前提)
-// のため、ここでは扱わない。
-#[derive(Deserialize, Default)]
-struct InboxFrontmatterFields {
-    title: Option<String>,
-    reason: Option<String>,
-    review_status: Option<String>,
-}
-
-fn parse_inbox_frontmatter(content: &str) -> InboxFrontmatterFields {
-    let trimmed = content.trim_start_matches('\u{feff}');
-    let after_first = match trimmed.strip_prefix("---") {
-        Some(rest) => rest,
-        None => return InboxFrontmatterFields::default(),
-    };
-    let end = match after_first.find("\n---") {
-        Some(i) => i,
-        None => return InboxFrontmatterFields::default(),
-    };
-    let yaml_block = &after_first[..end];
-    serde_yaml::from_str(yaml_block).unwrap_or_default()
-}
+use library_store::pending::PendingItems as PendingItemsDto;
 
 #[tauri::command]
 async fn list_pending_items() -> Result<PendingItemsDto, String> {
@@ -3151,119 +3092,40 @@ fn pending_badge_count() -> Option<usize> {
 }
 
 fn list_pending_items_blocking() -> Result<PendingItemsDto, String> {
-    let root = library_root();
-
-    let tags_path = root.join("_system").join("tags.yaml");
-    let tags_text = std::fs::read_to_string(&tags_path)
-        .map_err(|e| format!("tags.yamlの読み込みに失敗: {e}"))?;
-    let tags_file: YamlTagsFile =
-        serde_yaml::from_str(&tags_text).map_err(|e| format!("tags.yamlの解析に失敗: {e}"))?;
-    let tags = tags_file
-        .tags
-        .into_iter()
-        .filter(|t| t.status == "pending" || t.status == "deferred")
-        .map(|t| PendingTagDto { canonical: t.canonical, status: t.status })
-        .collect();
-
-    let projects_path = root.join("_system").join("projects.yaml");
-    let projects_text = std::fs::read_to_string(&projects_path)
-        .map_err(|e| format!("projects.yamlの読み込みに失敗: {e}"))?;
-    let projects_file: YamlProjectsFile = serde_yaml::from_str(&projects_text)
-        .map_err(|e| format!("projects.yamlの解析に失敗: {e}"))?;
-    let projects = projects_file
-        .projects
-        .into_iter()
-        .filter(|p| p.status == "pending" || p.status == "deferred")
-        .map(|p| PendingProjectDto { id: p.id, status: p.status })
-        .collect();
-
-    let inbox_dir = root.join("00-inbox");
-    let mut inbox = Vec::new();
-    if inbox_dir.is_dir() {
-        let entries = std::fs::read_dir(&inbox_dir)
-            .map_err(|e| format!("00-inbox/の読み込みに失敗: {e}"))?;
-        for entry in entries {
-            let entry = entry.map_err(|e| format!("00-inbox/の読み込みに失敗: {e}"))?;
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("md") {
-                continue;
-            }
-            let filename = match path.file_name().and_then(|n| n.to_str()) {
-                Some(n) => n.to_string(),
-                None => continue,
-            };
-            let content = std::fs::read_to_string(&path)
-                .map_err(|e| format!("{filename}の読み込みに失敗: {e}"))?;
-            let fields = parse_inbox_frontmatter(&content);
-            if fields.review_status.as_deref() == Some("confirmed") {
-                continue;
-            }
-            inbox.push(PendingInboxItemDto {
-                filename,
-                title: fields.title,
-                reason: fields.reason,
-                review_status: fields.review_status,
-            });
-        }
+    // サーバーに接続しているときは、サーバーの一覧を使う(詩織Ver7.0)
+    if let Some(c) = remote::client() {
+        return remote::decode(shiori_client::library::pending(&c).map_err(remote::message)?);
     }
-
-    Ok(PendingItemsDto { tags, projects, inbox })
+    library_store::pending::list(&library_root())
 }
 
-fn pending_action_to_status(action: &str) -> Result<&'static str, String> {
-    match action {
-        "confirm" => Ok("confirmed"),
-        "defer" => Ok("deferred"),
-        _ => Err(format!("不明なaction: {action}")),
+/// 要確認を解決する。サーバーに接続しているときは、サーバーの窓口へ送る(詩織Ver7.0)。
+fn resolve_pending(kind: library_store::pending::Kind, key: &str, action: &str) -> Result<(), String> {
+    if let Some(c) = remote::client() {
+        let name = match kind {
+            library_store::pending::Kind::Tag => "tag",
+            library_store::pending::Kind::Project => "project",
+            library_store::pending::Kind::Inbox => "inbox",
+        };
+        return shiori_client::library::resolve_pending(&c, name, key, action).map(|_| ()).map_err(remote::message);
     }
+    library_store::pending::resolve(&library_root(), kind, key, action).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn resolve_pending_tag(canonical: String, action: String) -> Result<(), String> {
-    run_blocking(move || resolve_pending_tag_blocking(canonical, action)).await
-}
-
-fn resolve_pending_tag_blocking(canonical: String, action: String) -> Result<(), String> {
-    let root = library_root();
-    if action == "reject" {
-        return library_store::registry::remove_item(&root, library_store::registry::TAGS_YAML, "canonical", &canonical)
-            .map_err(|e| e.to_string());
-    }
-    let status = pending_action_to_status(&action)?;
-    library_store::registry::set_status(&root, library_store::registry::TAGS_YAML, "canonical", &canonical, status)
-        .map_err(|e| e.to_string())
+    run_blocking(move || resolve_pending(library_store::pending::Kind::Tag, &canonical, &action)).await
 }
 
 #[tauri::command]
 async fn resolve_pending_project(id: String, action: String) -> Result<(), String> {
-    run_blocking(move || resolve_pending_project_blocking(id, action)).await
-}
-
-fn resolve_pending_project_blocking(id: String, action: String) -> Result<(), String> {
-    let root = library_root();
-    if action == "reject" {
-        return library_store::registry::remove_item(&root, library_store::registry::PROJECTS_YAML, "id", &id)
-            .map_err(|e| e.to_string());
-    }
-    let status = pending_action_to_status(&action)?;
-    library_store::registry::set_status(&root, library_store::registry::PROJECTS_YAML, "id", &id, status)
-        .map_err(|e| e.to_string())
+    run_blocking(move || resolve_pending(library_store::pending::Kind::Project, &id, &action)).await
 }
 
 #[tauri::command]
 async fn resolve_pending_inbox_item(filename: String, action: String) -> Result<(), String> {
-    run_blocking(move || resolve_pending_inbox_item_blocking(filename, action)).await
-}
-
-fn resolve_pending_inbox_item_blocking(filename: String, action: String) -> Result<(), String> {
-    // filenameはUI側がlist_pending_itemsで取得した一覧由来の値のみを渡す前提だが、
-    // パストラバーサル対策として、ファイル名の検証はlibrary_store::inboxが行う。
-    let root = library_root();
-    if action == "reject" {
-        return library_store::inbox::remove(&root, &filename).map_err(|e| e.to_string());
-    }
-    let status = pending_action_to_status(&action)?;
-    library_store::inbox::set_review_status(&root, &filename, status).map_err(|e| e.to_string())
+    // ファイル名の検証は、library_store::inboxが行う(パストラバーサル対策)
+    run_blocking(move || resolve_pending(library_store::pending::Kind::Inbox, &filename, &action)).await
 }
 
 #[derive(Serialize)]

@@ -47,6 +47,24 @@ pub fn list(c: &Client, path: &str, limit: usize) -> R {
     c.get(&format!("/api/v1/list?path={}&limit={limit}", encode_component(path)))
 }
 
+/// 要確認の一覧(`{tags, projects, inbox}`)。
+pub fn pending(c: &Client) -> R {
+    c.get("/api/v1/pending")
+}
+
+/// 要確認の解決。`kind` は `tag`・`project`・`inbox`、`action` は `confirm`・`defer`・`reject`。
+pub fn resolve_pending(c: &Client, kind: &str, key: &str, action: &str) -> R {
+    c.post(
+        &format!(
+            "/api/v1/pending/resolve?kind={}&key={}&action={}",
+            encode_component(kind),
+            encode_component(key),
+            encode_component(action)
+        ),
+        &serde_json::json!({}),
+    )
+}
+
 /// メモを受信箱(`00-inbox/{stem}.md`)に新規作成する。同じ名前があれば `{stem}-2.md`、`-3` … と連番を付ける。
 /// 保存したファイル名を返す。サーバーが、保存と同時に索引へ入れる。
 pub fn save_inbox_memo(c: &Client, stem: &str, markdown: &str) -> Result<String, ClientError> {
@@ -112,7 +130,11 @@ mod tests {
         shelf_doc(&c, "超実数.md").unwrap();
         doc(&c, "library/a b.md").unwrap();
         list(&c, "library/20-projects/shiori/journal", 3).unwrap();
+        pending(&c).unwrap();
+        resolve_pending(&c, "tag", "新 タグ", "confirm").unwrap();
         let log = seen.lock().unwrap().clone();
+        assert_eq!(log[8], "GET /api/v1/pending ");
+        assert!(log[9].starts_with("POST /api/v1/pending/resolve?kind=tag&key=%E6%96%B0%20%E3%82%BF%E3%82%B0&action=confirm"));
         assert_eq!(log[0], "GET /api/v1/library-index ");
         assert_eq!(log[1], r#"POST /api/v1/search/library {"limit":5,"query":"詩織"}"#);
         assert_eq!(log[2], r#"POST /api/v1/search/shelf {"query":"数学"}"#);

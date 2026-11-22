@@ -442,6 +442,42 @@ fn 参照資料の本文をカテゴリと名前から返し外は読めない()
 }
 
 #[test]
+fn 要確認の一覧と解決は窓口から行え解決の対象は監査に残る() {
+    let e = Env::new();
+    std::fs::write(
+        e.lib().join("_system/tags.yaml"),
+        "# 台帳\ntags:\n  - canonical: 詩織\n    status: confirmed\n  - canonical: 新タグ\n    status: pending\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(e.lib().join("00-inbox")).unwrap();
+    std::fs::write(e.lib().join("00-inbox/a.md"), "---\ntitle: 受信A\nreason: 理由\n---\n本文").unwrap();
+    let (code, v) = e.win("GET", "/api/v1/pending", None);
+    assert_eq!(code, 200);
+    assert_eq!(v["tags"][0]["canonical"], "新タグ");
+    assert_eq!(v["inbox"][0]["filename"], "a.md");
+    assert_eq!(v["inbox"][0]["reason"], "理由");
+    // 承認(タグ)・保留(受信箱)
+    let (code, _) = e.win("POST", "/api/v1/pending/resolve?kind=tag&key=%E6%96%B0%E3%82%BF%E3%82%B0&action=confirm", None);
+    assert_eq!(code, 200);
+    assert_eq!(e.win("POST", "/api/v1/pending/resolve?kind=inbox&key=a.md&action=defer", None).0, 200);
+    let (_, v) = e.win("GET", "/api/v1/pending", None);
+    assert_eq!((v["tags"].as_array().unwrap().len(), v["inbox"][0]["reviewStatus"].as_str()), (0, Some("deferred")));
+    // 却下(受信箱は消える)
+    assert_eq!(e.win("POST", "/api/v1/pending/resolve?kind=inbox&key=a.md&action=reject", None).0, 200);
+    assert!(!e.lib().join("00-inbox/a.md").exists());
+    // 断るもの
+    assert_eq!(e.win("POST", "/api/v1/pending/resolve?kind=inbox&key=..%2F_system%2Ftags.yaml&action=reject", None).0, 422);
+    assert_eq!(e.win("POST", "/api/v1/pending/resolve?kind=x&key=a&action=confirm", None).0, 422);
+    assert_eq!(e.win("POST", "/api/v1/pending/resolve?kind=tag&key=a&action=bogus", None).0, 422);
+    assert_eq!(e.win("POST", "/api/v1/pending/resolve?kind=tag&key=無い&action=confirm", None).0, 404);
+    assert_eq!(e.win("POST", "/api/v1/pending/resolve?kind=tag", None).0, 400);
+    // 何を解決したかが、監査のURLに残る
+    let dir = e.root.join("data/audit");
+    let file = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap().path();
+    assert!(std::fs::read_to_string(file).unwrap().contains("pending/resolve?kind=inbox&key=a.md&action=reject"));
+}
+
+#[test]
 fn 蔵書の一覧はragが無ければ503で返る() {
     assert_eq!(Env::new().win("GET", "/api/v1/library-index", None).0, 503);
 }

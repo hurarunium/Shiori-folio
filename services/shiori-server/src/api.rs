@@ -197,6 +197,11 @@ fn route(app: &App, method: &Method, path: &str, url: &str, body: &str, device: 
         (Method::Get, "/api/v1/doc") => doc_get(app, url),
         (Method::Get, "/api/v1/list") => doc_list(app, url),
         (Method::Get, "/api/v1/library-index") => library_index(app),
+        (Method::Get, "/api/v1/pending") => match library_store::pending::list(&app.roots.library) {
+            Ok(p) => (200, json!(p)),
+            Err(m) => err(500, &m),
+        },
+        (Method::Post, "/api/v1/pending/resolve") => pending_resolve(app, url),
         (Method::Get, "/api/v1/source") => source_get(app, url),
         (Method::Get, "/api/v1/shelf") => (200, json!(library_store::shelf_view::list(&app.roots.knowledge))),
         (Method::Get, "/api/v1/shelf/doc") => match query_param(url, "name") {
@@ -399,6 +404,23 @@ fn search(app: &App, endpoint: &str, body: &str) -> Reply {
             (200, r)
         }
         Err((code, m)) => err(code, &m),
+    }
+}
+
+/// 要確認の解決(`POST /api/v1/pending/resolve?kind=tag|project|inbox&key=<対象>&action=confirm|defer|reject`)。
+/// 対象と操作をURLに置くのは、監査ログ(URLを残す)に、何を解決したかが残るようにするため。
+fn pending_resolve(app: &App, url: &str) -> Reply {
+    let (Some(kind), Some(key), Some(action)) = (query_param(url, "kind"), query_param(url, "key"), query_param(url, "action")) else {
+        return err(400, "kind・key・action が必要");
+    };
+    let Some(kind) = library_store::pending::Kind::parse(&kind) else { return err(422, "kind は tag・project・inbox のどれか") };
+    match library_store::pending::resolve(&app.roots.library, kind, &key, &action) {
+        Ok(()) => {
+            // 受信箱の記事の状態が変わった・消えたときは、索引も合わせる
+            let indexed = kind == library_store::pending::Kind::Inbox && app.reindex(&Reindex::Library(format!("00-inbox/{key}")));
+            (200, json!({"resolved": key, "action": action, "indexed": indexed}))
+        }
+        Err(e) => store_err(e),
     }
 }
 
