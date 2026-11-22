@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::UNIX_EPOCH;
 
 use chrono::{Local, NaiveDate};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_yaml::{Mapping, Value};
 use unicode_normalization::UnicodeNormalization;
 
@@ -36,7 +36,7 @@ const RESERVED_NAMES: &[&str] = &[
 static ID_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// 1件のタスク。`folder`は`Unity/Tanker`の形で、未分類は空文字列。
-#[derive(Serialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
     pub id: String,
@@ -668,6 +668,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn タスクは送って受け取り直せる() {
+        // サーバー経由(アプリ)では、サーバーが返した形から Task を作り直す。pathは外へ出さない
+        let root = temp_root("roundtrip");
+        folder_add(&root, "A/B").unwrap();
+        let t = add(&root, &NewTask { summary: "往復", folder: "A/B", due: Some("2026-12-01"), detail: "詳細" }).unwrap();
+        let text = serde_yaml::to_string(&t).unwrap();
+        assert!(!text.contains("path"));
+        let back: Task = serde_yaml::from_str(&text).unwrap();
+        assert_eq!((back.id, back.summary, back.folder, back.due, back.detail), (t.id, t.summary, t.folder, t.due, t.detail));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn new_task(summary: &str) -> NewTask<'_> {

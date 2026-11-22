@@ -27,6 +27,7 @@ mod shelf;
 mod system_docs;
 mod system_info;
 pub mod tasks;
+mod remote;
 mod text_transform;
 mod whisper_client;
 
@@ -2377,21 +2378,39 @@ async fn read_system_doc(id: String) -> Result<String, String> {
 // タスクの画面(詩織Ver6.2)向け。読み書きはtasks.rsに集め、CLI(shiori-task)と同じ関数を呼ぶ。
 #[tauri::command]
 async fn list_tasks(archived: bool) -> Result<Vec<tasks::Task>, String> {
-    run_blocking(move || Ok(tasks::list(&tasks_root(), archived))).await
+    run_blocking(move || match remote::client() {
+        Some(c) => {
+            let v = shiori_client::tasks::list(&c, archived).map_err(remote::message)?;
+            remote::decode(v["tasks"].clone())
+        }
+        None => Ok(tasks::list(&tasks_root(), archived)),
+    })
+    .await
 }
 
 #[tauri::command]
 async fn list_task_folders() -> Result<Vec<String>, String> {
-    run_blocking(move || Ok(tasks::folders(&tasks_root()))).await
+    run_blocking(move || match remote::client() {
+        Some(c) => remote::decode(shiori_client::tasks::folders(&c).map_err(remote::message)?["folders"].clone()),
+        None => Ok(tasks::folders(&tasks_root())),
+    })
+    .await
+}
+
+// サーバーとの接続の状態(画面の表示用)。設定が無ければ`local`(手元で動く)。
+#[tauri::command]
+async fn get_server_status() -> Result<remote::ServerStatusDto, String> {
+    run_blocking(move || Ok(remote::status(remote::client().as_ref()))).await
 }
 
 #[tauri::command]
 async fn add_task(summary: String, folder: String, due: Option<String>, detail: String) -> Result<tasks::Task, String> {
-    run_blocking(move || {
-        tasks::add(
+    run_blocking(move || match remote::client() {
+        Some(c) => remote::decode(shiori_client::tasks::add(&c, &summary, &folder, due.as_deref(), &detail).map_err(remote::message)?),
+        None => tasks::add(
             &tasks_root(),
             &tasks::NewTask { summary: &summary, folder: &folder, due: due.as_deref(), detail: &detail },
-        )
+        ),
     })
     .await
 }
@@ -2407,6 +2426,11 @@ async fn save_task(
     expected_mtime: f64,
 ) -> Result<tasks::Task, String> {
     run_blocking(move || {
+        if let Some(c) = remote::client() {
+            let v = shiori_client::tasks::save(&c, &id, &summary, &folder, due.as_deref(), &detail, expected_mtime)
+                .map_err(remote::message)?;
+            return remote::decode(v);
+        }
         let root = tasks_root();
         let change = tasks::TaskEdit { summary: Some(&summary), due: Some(due.as_deref()), detail: Some(&detail) };
         tasks::edit(&root, &id, &change, Some(expected_mtime))?;
@@ -2417,32 +2441,57 @@ async fn save_task(
 
 #[tauri::command]
 async fn complete_task(id: String) -> Result<tasks::Task, String> {
-    run_blocking(move || tasks::complete(&tasks_root(), &id)).await
+    run_blocking(move || match remote::client() {
+        Some(c) => remote::decode(shiori_client::tasks::complete(&c, &id).map_err(remote::message)?),
+        None => tasks::complete(&tasks_root(), &id),
+    })
+    .await
 }
 
 #[tauri::command]
 async fn restore_task(id: String) -> Result<tasks::Task, String> {
-    run_blocking(move || tasks::restore(&tasks_root(), &id)).await
+    run_blocking(move || match remote::client() {
+        Some(c) => remote::decode(shiori_client::tasks::restore(&c, &id).map_err(remote::message)?),
+        None => tasks::restore(&tasks_root(), &id),
+    })
+    .await
 }
 
 #[tauri::command]
 async fn delete_task(id: String) -> Result<(), String> {
-    run_blocking(move || tasks::delete(&tasks_root(), &id)).await
+    run_blocking(move || match remote::client() {
+        Some(c) => shiori_client::tasks::delete(&c, &id).map(|_| ()).map_err(remote::message),
+        None => tasks::delete(&tasks_root(), &id),
+    })
+    .await
 }
 
+// フォルダの操作は、手元では変更後の名前(または名前)を返す。サーバーは一覧を返すので、名前は引数から決める。
 #[tauri::command]
 async fn add_task_folder(folder: String) -> Result<String, String> {
-    run_blocking(move || tasks::folder_add(&tasks_root(), &folder)).await
+    run_blocking(move || match remote::client() {
+        Some(c) => shiori_client::tasks::folder_add(&c, &folder).map(|_| folder).map_err(remote::message),
+        None => tasks::folder_add(&tasks_root(), &folder),
+    })
+    .await
 }
 
 #[tauri::command]
 async fn rename_task_folder(from: String, to: String) -> Result<String, String> {
-    run_blocking(move || tasks::folder_rename(&tasks_root(), &from, &to)).await
+    run_blocking(move || match remote::client() {
+        Some(c) => shiori_client::tasks::folder_rename(&c, &from, &to).map(|_| to).map_err(remote::message),
+        None => tasks::folder_rename(&tasks_root(), &from, &to),
+    })
+    .await
 }
 
 #[tauri::command]
 async fn remove_task_folder(folder: String) -> Result<(), String> {
-    run_blocking(move || tasks::folder_remove(&tasks_root(), &folder)).await
+    run_blocking(move || match remote::client() {
+        Some(c) => shiori_client::tasks::folder_remove(&c, &folder).map(|_| ()).map_err(remote::message),
+        None => tasks::folder_remove(&tasks_root(), &folder),
+    })
+    .await
 }
 
 // 知識の棚タブ(Ver5.0候補)向け。一覧と本文は`knowledge/`を直接読み(shelf.rs参照)、
@@ -5635,6 +5684,7 @@ pub fn run() {
             read_system_doc,
             list_tasks,
             list_task_folders,
+            get_server_status,
             add_task,
             save_task,
             complete_task,
