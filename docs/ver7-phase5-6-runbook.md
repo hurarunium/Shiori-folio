@@ -58,6 +58,7 @@
 4. `migrate-apply`(照合に通るたびに、段階が進む)→ `migrate-verify`。行き先は、サーバーの正本の置き場(空であること)。
 5. 索引を入れる(大きな索引は、開発機で作って送る)。
 6. AIの入口を切り替える(`docs/ver7-drafts/` の入口3つ、skill 3つ、`_system/CLAUDE.md` の改訂)。
+6-2. 試験の間に使ったトークンは、失効させて作り直す(`shiori-server token revoke <端末名> --data <data>` → `token add`)。作り直した値は、チャットなどに貼らず、`server.json` に自分で置く。
 7. 両方の端末の `data\server.json`(`{url, token}`)を置き、アプリ・CLIをサーバーへつなぐ。
 8. SSDの `portable\` に、凍結の目印を置く(書き込まない旨)。
 9. サーバーで、最初の世代を作り、SSDへ写す(1と同じ手順で、復元の確認まで)。

@@ -73,3 +73,12 @@
 - Phase 5-B(移行ツール): `shiori-server migrate-plan|migrate-apply|migrate-verify`(`library_store::migrate`)。本物のlibraryで予行と、作業場所への適用・照合に通った(警告なし)。
 - Phase 5(バックアップ・最小限): 毎日 05:00(日誌と同じ区切り)の世代、毎日7・毎週4の整理、`restore`・`verify`。SSDへ写すボタン・知らせ・画面は、7.0の後。会話の記録は世代に入れない。
 - 次の手順は `docs/ver7-phase5-6-runbook.md`。
+
+## T4(余りのPCへの配置)の結果(2026-11-22 夜)
+
+- 配置: `dist\ShioriServer`(変換した本物のlibraryの写しつき)を `C:\ShioriServer\` へ。`check-server.ps1` はすべてOK(空き 約31GB)。
+- 自動起動: `register-task.ps1` で登録。再起動後、ログインなしで窓口が戻り、子(埋め込み・RAG)も戻った。`LastTaskResult` が `0x800710E0` になるのは、動いているサーバーに重ねて起動しなかったため(失敗ではない)。
+- 索引づくり: 初回は約1時間(576件・約5,500の塊、CPU版の埋め込み)。再起動後は、索引が残っていて、約11分(PCの起動を含む)で `rag: True`。
+- アプリ(開発機)を、余りのPCのサーバーにつないで確認: 図書館の一覧・検索・素材を開く。
+- 見つかった不具合: 図書館の画面が `20-projects`・`10-common` を知らず、「未分類」になっていた。直した(a3249f7)。
+- 注意: 試作のタスク(`ShioriProtoServer`)が1分おきに子を起こし直すため、`runtime` を移すには、先にタスクを無効にしてプロセスを止める必要があった。スクリプトの実行は、`-ExecutionPolicy Bypass` を付けて行う。
