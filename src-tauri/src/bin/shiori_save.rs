@@ -19,12 +19,12 @@
 //! (素材だけがinboxに置かれると、実体と説明の対応が崩れるため)。
 
 use anyhow::{anyhow, bail, Context, Result};
-use sha2::{Digest, Sha256};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use library_store::assets;
 use library_store::fsx;
 use library_store::notes::{self, split_frontmatter, Frontmatter};
+use library_store::shelf;
 use shiori_folio_lib::shiori_log;
 use shiori_folio_lib::{library_root, load_search_backend_config, project_root, rag_client, shelf_root};
 
@@ -42,17 +42,6 @@ fn main() -> Result<()> {
         shiori_log::error("SAVE", "失敗した", &[("理由", &format!("{e:#}"))]);
     }
     outcome
-}
-
-// memory・素材の経路が使う、台帳の操作(library_store::registry)への薄い呼び出し。
-// これらの経路をlibrary_store::notesへ移したら、なくなる。
-fn ensure_project_registered(root: &Path, id: &str) -> Result<()> {
-    library_store::registry::ensure_project(root, id)?;
-    Ok(())
-}
-
-fn normalize_tag(root: &Path, raw: &str, newly_pending: &mut Vec<String>) -> Result<String> {
-    Ok(library_store::registry::normalize_tag(root, raw, newly_pending)?)
 }
 
 /// 保存の結果を標準出力にJSONで出し、ログにも残す。
@@ -88,7 +77,7 @@ fn run() -> Result<()> {
     if !source.is_file() {
         bail!("ファイルが見つかりません: {}", source.display());
     }
-    let is_asset_meta = source.extension().and_then(|e| e.to_str()) == Some(ASSET_META_EXT);
+    let is_asset_meta = source.extension().and_then(|e| e.to_str()) == Some(assets::ASSET_META_EXT);
     if copy_mode && !is_asset_meta {
         bail!("--copyは素材の.meta取り込み専用です");
     }
@@ -107,13 +96,7 @@ fn run() -> Result<()> {
     fm.date = Some(chrono::Local::now().to_rfc3339());
 
     if is_asset_meta {
-        let mut newly_pending_tags = Vec::new();
-        fm.tags = fm
-            .tags
-            .iter()
-            .map(|raw| normalize_tag(&root, raw, &mut newly_pending_tags))
-            .collect::<Result<Vec<_>>>()?;
-        return save_asset(&root, &source, fm, &body, copy_mode, newly_pending_tags);
+        return save_asset(&root, &source, fm, &body, copy_mode);
     }
 
     // 共通記憶MDは、固定の保存先への丸ごと上書き・競合検知・旧版退避という
@@ -126,7 +109,7 @@ fn run() -> Result<()> {
     }
 
     // 知識の棚の記事は、libraryの配置ルール・タグの台帳を使わず、棚へ置く専用の経路で処理する。
-    if fm.kind.as_deref() == Some(KNOWLEDGE_TYPE) {
+    if fm.kind.as_deref() == Some(shelf::KNOWLEDGE_TYPE) {
         return save_shelf(&source, fm, &body);
     }
 
@@ -179,25 +162,6 @@ fn reindex_saved_file(root: &Path, dest_path: &Path) {
             shiori_log::warn("SAVE", "検索の設定を読めない", &[("理由", &e)]);
         }
     }
-}
-
-// 一時ファイルに書いてからリネームで置き換える。書き込み途中で止まっても、
-// 保存先に中途半端なファイルが残らない。
-fn write_atomically(dest: &Path, content: &str) -> Result<()> {
-    let file_name = dest
-        .file_name()
-        .ok_or_else(|| anyhow!("ファイル名の取得に失敗"))?
-        .to_string_lossy();
-    let tmp = dest.with_file_name(format!(".{file_name}.tmp"));
-    if let Err(e) = std::fs::write(&tmp, content) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(anyhow!(e).context(format!("{}への書き込みに失敗", tmp.display())));
-    }
-    if let Err(e) = std::fs::rename(&tmp, dest) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(anyhow!(e).context(format!("{}への置き換えに失敗", dest.display())));
-    }
-    Ok(())
 }
 
 // 共通記憶MDを保存する。規則(保存先・競合検知・旧版の退避・上限の警告)と書き込みは
@@ -258,113 +222,6 @@ fn save_memory(
 
 // ---- 知識の棚(詩織Ver5.0候補) ----
 
-// 棚の記事のtype。library/の4種(VALID_TYPES)とは別物で、library/には置かない。
-const KNOWLEDGE_TYPE: &str = "knowledge";
-// 棚の下の管理用フォルダ(索引の対象外)。下書きと、上書き前の旧版を置く。
-const SHELF_SYSTEM_DIR: &str = "_system";
-const SHELF_DRAFTS_DIR: &str = "drafts";
-const SHELF_HISTORY_DIR: &str = "history";
-const DRAFT_STATUS: &str = "draft";
-// 棚の記事に必須の項目。sourceは読む側(indexing.py・shelf.rs)が1行しか読まないため、
-// 保存時にSOURCE_SEPARATORで1行へそろえる。
-const SHELF_REQUIRED_FIELDS: &[&str] = &["topic", "learned", "source"];
-const SOURCE_SEPARATOR: &str = " / ";
-
-// YAMLのスカラー値を文字列として取り出す(learnedが日付・数値として読まれた場合も文字列にする)。
-fn yaml_text(value: &serde_yaml::Value) -> Option<String> {
-    match value {
-        serde_yaml::Value::String(s) => Some(s.clone()),
-        serde_yaml::Value::Number(n) => Some(n.to_string()),
-        serde_yaml::Value::Bool(b) => Some(b.to_string()),
-        _ => None,
-    }
-}
-
-fn shelf_field(fm: &Frontmatter, key: &str) -> String {
-    fm.extra
-        .get(key)
-        .and_then(yaml_text)
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default()
-}
-
-// sourceのリスト・複数行の文字列を、空の要素を除いて「 / 」区切りの1行にする。
-fn single_line_source(value: &serde_yaml::Value) -> String {
-    let parts: Vec<String> = match value {
-        serde_yaml::Value::Sequence(items) => items.iter().filter_map(yaml_text).collect(),
-        other => yaml_text(other)
-            .map(|s| s.lines().map(str::to_string).collect())
-            .unwrap_or_default(),
-    };
-    parts
-        .iter()
-        .map(|p| p.trim())
-        .filter(|p| !p.is_empty())
-        .collect::<Vec<_>>()
-        .join(SOURCE_SEPARATOR)
-}
-
-// 棚に置けるか検証する。memoryと同じく、不備はinboxへ逃がさずエラーにする
-// (棚は、ふらるが承認した記事だけを置く場所のため)。
-fn validate_shelf(fm: &Frontmatter) -> Result<()> {
-    if fm.title.as_deref().map(str::trim).unwrap_or("").is_empty() {
-        bail!("titleが空です");
-    }
-    if fm.tags.is_empty() {
-        bail!("tagsが空です");
-    }
-    for key in SHELF_REQUIRED_FIELDS {
-        if shelf_field(fm, key).is_empty() {
-            bail!("{key}が空です(知識の棚の記事には{SHELF_REQUIRED_FIELDS:?}が必要です)");
-        }
-    }
-    Ok(())
-}
-
-// 棚に置くファイル名。棚の一覧(shelf.rs)は隠しファイルを読まないため、`.`始まりは拒否する。
-fn shelf_file_name(source: &Path) -> Result<String> {
-    let name = source
-        .file_name()
-        .ok_or_else(|| anyhow!("ファイル名の取得に失敗"))?
-        .to_string_lossy()
-        .to_string();
-    if !name.ends_with(".md") {
-        bail!("知識の棚の記事は.mdにしてください: {name}");
-    }
-    if name.starts_with('.') {
-        bail!(".で始まる名前は棚の一覧に出ないため使えません: {name}");
-    }
-    Ok(name)
-}
-
-// 退避名に付ける旧版の日付。learnedが無ければdateの日付部分、それも無ければunknown。
-fn shelf_history_label(old_fm: &Frontmatter) -> String {
-    let learned = shelf_field(old_fm, "learned");
-    let label = if !learned.is_empty() {
-        learned
-    } else {
-        old_fm
-            .date
-            .as_deref()
-            .map(|d| d.chars().take(10).collect::<String>())
-            .filter(|d| !d.trim().is_empty())
-            .unwrap_or_else(|| "unknown".to_string())
-    };
-    label.replace([':', '/', '\\'], "-")
-}
-
-// 退避先で既存のファイルと衝突しない名前を返す({名前}-{日付}.md、{名前}-{日付}-2.md…)。
-// 2026-10-21に、退避先の同名を確かめずに上書きして仮データを消したことの再発防止。
-fn shelf_history_destination(history_dir: &Path, stem: &str, label: &str) -> PathBuf {
-    let mut candidate = history_dir.join(format!("{stem}-{label}.md"));
-    let mut n = 2;
-    while candidate.exists() {
-        candidate = history_dir.join(format!("{stem}-{label}-{n}.md"));
-        n += 1;
-    }
-    candidate
-}
-
 // 同じファイルを指しているか(棚の記事そのものを渡された場合の検出用)。
 fn is_same_file(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
@@ -392,69 +249,45 @@ fn reindex_shelf_saved_file(file_name: &str) {
     }
 }
 
-// 知識の棚へ保存する。status: draftは_system/drafts/へ(索引に入れない、同名は上書き)、
-// それ以外は棚の直下へ置いて即時に索引へ入れる。正式な記事の上書きでは、旧版を
-// _system/history/へ連番付きで退避してから置き換え、作成日時(date)は旧版から引き継ぐ。
-fn save_shelf(source: &Path, mut fm: Frontmatter, body: &str) -> Result<()> {
+// 知識の棚へ保存する。規則(検証・下書きの扱い・旧版の連番つき退避・dateの引き継ぎ)と書き込みは
+// library_store::shelf::save_shelf。ここは、元ファイルとの同一確認、元ファイルの削除、
+// 索引への反映、結果の出力だけを担う。
+fn save_shelf(source: &Path, fm: Frontmatter, body: &str) -> Result<()> {
     let shelf = shelf_root();
     if !shelf.is_dir() {
         bail!("知識の棚(knowledge/)が見つかりません: {}", shelf.display());
     }
-    if let Some(value) = fm.extra.get("source") {
-        let line = single_line_source(value);
-        fm.extra.insert("source".to_string(), serde_yaml::Value::String(line));
-    }
-    validate_shelf(&fm)?;
-    let file_name = shelf_file_name(source)?;
-    let is_draft = fm.status.trim() == DRAFT_STATUS;
-
-    let dest_dir = if is_draft {
-        shelf.join(SHELF_SYSTEM_DIR).join(SHELF_DRAFTS_DIR)
-    } else {
-        shelf.clone()
-    };
-    std::fs::create_dir_all(&dest_dir)
-        .with_context(|| format!("{}の作成に失敗", dest_dir.display()))?;
-    let dest = dest_dir.join(&file_name);
+    let file_name = source
+        .file_name()
+        .ok_or_else(|| anyhow!("ファイル名の取得に失敗"))?
+        .to_string_lossy()
+        .to_string();
+    shelf::check_file_name(&file_name)?;
+    let is_draft = fm.status.trim() == shelf::DRAFT_STATUS;
     // 保存先そのものを渡されると、旧版を退避できず、最後の元ファイルの削除で記事が消える。
+    let dest = fsx::resolve(&shelf, &shelf::destination_rel(&file_name, is_draft))?;
     if is_same_file(source, &dest) {
         bail!(
             "保存先の記事そのものは渡せません。別の場所(下書きなら_system/drafts/)に書いてから渡してください: {}",
             dest.display()
         );
     }
-
-    let mut history_file = None;
-    if !is_draft && dest.is_file() {
-        let old_text = std::fs::read_to_string(&dest)
-            .with_context(|| format!("{}の読み込みに失敗", dest.display()))?;
-        let (old_fm, _) = split_frontmatter(&old_text)
-            .with_context(|| format!("既存の記事のfrontmatterを読めません: {}", dest.display()))?;
-        fm.date = old_fm.date.clone().or(fm.date);
-        let history_dir = shelf.join(SHELF_SYSTEM_DIR).join(SHELF_HISTORY_DIR);
-        std::fs::create_dir_all(&history_dir)
-            .with_context(|| format!("{}の作成に失敗", history_dir.display()))?;
-        let stem = file_name.strip_suffix(".md").unwrap_or(&file_name);
-        let path = shelf_history_destination(&history_dir, stem, &shelf_history_label(&old_fm));
-        // 退避に失敗したら上書きしない。
-        std::fs::write(&path, &old_text)
-            .with_context(|| format!("旧版の退避に失敗: {}", path.display()))?;
-        history_file = Some(path);
-    }
-
-    let frontmatter_yaml = serde_yaml::to_string(&fm).context("frontmatterのYAML化に失敗")?;
-    write_atomically(&dest, &format!("---\n{frontmatter_yaml}---\n{body}"))?;
+    let saved = shelf::save_shelf(&shelf, &file_name, fm, body)?;
     std::fs::remove_file(source)
         .with_context(|| format!("移動元{}の削除に失敗", source.display()))?;
 
-    if !is_draft {
+    if !saved.draft {
         reindex_shelf_saved_file(&file_name);
     }
 
+    let history_file = match &saved.history_rel {
+        Some(h) => Some(fsx::resolve(&shelf, h)?.display().to_string()),
+        None => None,
+    };
     let result = serde_json::json!({
-        "destination": dest.display().to_string(),
-        "draft": is_draft,
-        "history_file": history_file.map(|p| p.display().to_string()),
+        "destination": saved.path.display().to_string(),
+        "draft": saved.draft,
+        "history_file": history_file,
     });
     print_result("棚", &result)?;
     Ok(())
@@ -462,147 +295,23 @@ fn save_shelf(source: &Path, mut fm: Frontmatter, body: &str) -> Result<()> {
 
 // ---- 素材の取り込み(詩織Ver3.5) ----
 
-// 素材のサイドカーの拡張子。「X.zip」に対し「X.zip.meta」を置く。
-const ASSET_META_EXT: &str = "meta";
-
-// 素材の実体名として拒否する、名前から明らかな秘密情報(中身は検査しない)。
-// libraryはMCP経由で外部AIにも読めるため、秘密鍵・環境変数ファイルを置かせない。
-fn secret_name_reason(file_name: &str) -> Option<&'static str> {
-    let lower = file_name.to_ascii_lowercase();
-    if lower.starts_with("id_") && !lower.ends_with(".pub") {
-        return Some("SSH秘密鍵(id_*)");
-    }
-    if lower.ends_with(".pem") || lower.ends_with(".ppk") || lower.ends_with(".key") {
-        return Some("秘密鍵・証明書(.pem/.ppk/.key)");
-    }
-    if lower == ".env" || lower.starts_with(".env.") {
-        return Some("環境変数ファイル(.env)");
-    }
-    if lower == "key.txt" {
-        return Some("鍵ファイル(key.txt)");
-    }
-    None
-}
-
-// 素材のtype/projectから保存先の`files/`を決める。mdと違い不備はinboxへ逃がさず
-// エラーにする(素材だけがinboxに置かれ、実体と説明の対応が崩れるのを防ぐ)。
-fn decide_asset_destination(root: &Path, fm: &Frontmatter) -> Result<PathBuf> {
-    if fm.title.as_deref().map(str::trim).unwrap_or("").is_empty() {
-        bail!("titleが空です");
-    }
-    if fm.tags.is_empty() {
-        bail!("tagsが空です");
-    }
-    let project = fm.project.as_deref().map(str::trim).filter(|p| !p.is_empty());
-    match fm.kind.as_deref() {
-        Some("project") | Some("area") => {
-            let p = project.ok_or_else(|| {
-                anyhow!("typeがproject/areaの素材にはprojectが必要です(保存先が決まりません)")
-            })?;
-            ensure_project_registered(root, p)?;
-            let top = if fm.kind.as_deref() == Some("project") { "10-projects" } else { "20-areas" };
-            Ok(root.join(top).join(p).join("files"))
-        }
-        Some("resource") => Ok(root.join("30-resources").join("files")),
-        Some("profile") => bail!("type: profileには素材を置けません"),
-        other => bail!("typeが不正です(値: {other:?}, 素材で許可: project/area/resource)"),
-    }
-}
-
-fn sha256_of(path: &Path) -> Result<String> {
-    let mut file =
-        std::fs::File::open(path).with_context(|| format!("{}を開けません", path.display()))?;
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; 1024 * 1024];
-    loop {
-        let n = file.read(&mut buf).with_context(|| format!("{}の読み込みに失敗", path.display()))?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
-}
-
-// 保存先で素材・.metaのどちらとも衝突しない名前の組を返す。衝突時は実体と
-// .metaに同じ連番を付ける(X.zip → X-2.zip と X-2.zip.meta)。
-fn unique_asset_destination(dir: &Path, asset_name: &str) -> (PathBuf, PathBuf) {
-    let (stem, ext) = match asset_name.rfind('.') {
-        Some(i) if i > 0 => (&asset_name[..i], &asset_name[i..]),
-        _ => (asset_name, ""),
-    };
-    let mut n = 1;
-    loop {
-        let name = if n == 1 { asset_name.to_string() } else { format!("{stem}-{n}{ext}") };
-        let asset = dir.join(&name);
-        let meta = dir.join(format!("{name}.{ASSET_META_EXT}"));
-        if !asset.exists() && !meta.exists() {
-            return (asset, meta);
-        }
-        n += 1;
-    }
-}
-
+// 素材を取り込む。規則(秘密情報の名前の拒否・保存先の決定・SHA-256照合つきのコピー・.metaの書き込み)は
+// library_store::assets::save_asset。ここは、.metaの隣の実体の確認、原本の削除(--copyでなければ)、
+// 索引への反映、結果の出力だけを担う。
 fn save_asset(
     root: &Path,
     meta_source: &Path,
-    mut fm: Frontmatter,
+    fm: Frontmatter,
     body: &str,
     copy_mode: bool,
-    newly_pending_tags: Vec<String>,
 ) -> Result<()> {
     // 素材は.metaと同じフォルダに、.metaを除いた同名で置かれている前提。
     let asset_source = meta_source.with_extension("");
     if !asset_source.is_file() {
         bail!("素材が見つかりません(.metaの隣に同名で置いてください): {}", asset_source.display());
     }
-    let asset_name = asset_source
-        .file_name()
-        .ok_or_else(|| anyhow!("素材のファイル名の取得に失敗"))?
-        .to_string_lossy()
-        .to_string();
-    if let Some(reason) = secret_name_reason(&asset_name) {
-        bail!("秘密情報の可能性があるため取り込めません({reason}): {asset_name}");
-    }
-
-    let dest_dir = decide_asset_destination(root, &fm)?;
-    std::fs::create_dir_all(&dest_dir)
-        .with_context(|| format!("{}の作成に失敗", dest_dir.display()))?;
-    let (asset_dest, meta_dest) = unique_asset_destination(&dest_dir, &asset_name);
-
-    // 移動は「コピー→SHA-256照合→一致したら原本を削除」の順で行う。別ドライブ間
-    // でも安全に動かすためで、不一致や途中の失敗では原本を残し、作った分を片付ける。
-    let source_hash = sha256_of(&asset_source)?;
-    let size = std::fs::metadata(&asset_source)?.len();
-    let cleanup = |paths: &[&Path]| {
-        for p in paths {
-            let _ = std::fs::remove_file(p);
-        }
-    };
-    std::fs::copy(&asset_source, &asset_dest)
-        .with_context(|| format!("素材のコピーに失敗: {}", asset_dest.display()))?;
-    let dest_hash = match sha256_of(&asset_dest) {
-        Ok(h) => h,
-        Err(e) => {
-            cleanup(&[&asset_dest]);
-            return Err(e);
-        }
-    };
-    if dest_hash != source_hash {
-        cleanup(&[&asset_dest]);
-        bail!("コピー後のSHA-256が一致しません。原本は残しました: {}", asset_source.display());
-    }
-
-    // sha256・サイズ・dateはCLIが決定的に書く(人・AIが書いた値は上書きする)。
-    fm.date = Some(chrono::Local::now().to_rfc3339());
-    fm.extra.insert("sha256".to_string(), serde_yaml::Value::String(source_hash));
-    fm.extra.insert("size".to_string(), serde_yaml::Value::Number(size.into()));
-    let frontmatter_yaml = serde_yaml::to_string(&fm).context("frontmatterのYAML化に失敗")?;
-    let new_content = format!("---\n{frontmatter_yaml}---\n{body}");
-    if let Err(e) = std::fs::write(&meta_dest, new_content) {
-        cleanup(&[&asset_dest, &meta_dest]);
-        return Err(anyhow!(e).context(format!("{}への書き込みに失敗", meta_dest.display())));
-    }
+    let now = chrono::Local::now().to_rfc3339();
+    let saved = assets::save_asset(root, &asset_source, fm, body, &now)?;
 
     if !copy_mode {
         std::fs::remove_file(&asset_source)
@@ -611,13 +320,13 @@ fn save_asset(
             .with_context(|| format!("移動元{}の削除に失敗", meta_source.display()))?;
     }
 
-    reindex_saved_file(root, &meta_dest);
+    reindex_saved_file(root, &saved.meta_path);
 
     let result = serde_json::json!({
-        "destination": meta_dest.display().to_string(),
-        "asset_destination": asset_dest.display().to_string(),
+        "destination": saved.meta_path.display().to_string(),
+        "asset_destination": saved.asset_path.display().to_string(),
         "inbox_reason": serde_json::Value::Null,
-        "newly_pending_tags": newly_pending_tags,
+        "newly_pending_tags": saved.newly_pending_tags,
     });
     print_result("素材", &result)?;
     Ok(())
@@ -626,31 +335,6 @@ fn save_asset(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn 秘密情報の名前は拒否し公開鍵は通す() {
-        for name in ["id_ed25519", "id_rsa", "server.pem", "putty.PPK", "a.key", ".env", ".env.local", "key.txt"] {
-            assert!(secret_name_reason(name).is_some(), "{name}は拒否されるべき");
-        }
-        for name in ["id_ed25519.pub", "report.pdf", "environment.zip", "monkey.txt", "pc-backup.zip"] {
-            assert!(secret_name_reason(name).is_none(), "{name}は通すべき");
-        }
-    }
-
-    #[test]
-    fn 同名があれば実体とmetaに同じ連番を付ける() {
-        let dir = std::env::temp_dir().join(format!("shiori-save-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let (asset, meta) = unique_asset_destination(&dir, "a.tar.gz");
-        assert_eq!(asset.file_name().unwrap(), "a.tar.gz");
-        assert_eq!(meta.file_name().unwrap(), "a.tar.gz.meta");
-        // 実体が無くても.metaだけ残っていれば衝突として扱う。
-        std::fs::write(&meta, "x").unwrap();
-        let (asset2, meta2) = unique_asset_destination(&dir, "a.tar.gz");
-        assert_eq!(asset2.file_name().unwrap(), "a.tar-2.gz");
-        assert_eq!(meta2.file_name().unwrap(), "a.tar-2.gz.meta");
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
 
     fn fm_of(kind: &str, project: Option<&str>) -> Frontmatter {
         Frontmatter {
@@ -683,85 +367,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), original);
         assert!(!root.join("_system").exists(), "旧版の退避も行わない");
         std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    fn shelf_fm(yaml: &str) -> Frontmatter {
-        split_frontmatter(&format!("---\n{yaml}\n---\n本文\n")).unwrap().0
-    }
-
-    #[test]
-    fn 棚のsourceはリストも複数行も1行にそろえる() {
-        let fm = shelf_fm("source:\n- https://a.example/x\n- ''\n- 'Keisler, Foundations'");
-        assert_eq!(
-            single_line_source(&fm.extra["source"]),
-            "https://a.example/x / Keisler, Foundations"
-        );
-        let fm = shelf_fm("source: |\n  教科書A\n\n  https://b.example\n");
-        assert_eq!(single_line_source(&fm.extra["source"]), "教科書A / https://b.example");
-        let fm = shelf_fm("source: 'そのまま 1行'");
-        assert_eq!(single_line_source(&fm.extra["source"]), "そのまま 1行");
-    }
-
-    #[test]
-    fn 長いsourceも書き出しで折り返さない() {
-        let long = vec!["https://example.com/a very long title with spaces"; 6].join(SOURCE_SEPARATOR);
-        let mut fm = shelf_fm("title: t");
-        fm.extra.insert("source".to_string(), serde_yaml::Value::String(long.clone()));
-        let yaml = serde_yaml::to_string(&fm).unwrap();
-        let line = yaml.lines().find(|l| l.starts_with("source:")).unwrap();
-        assert!(line.contains("example.com/a very long title with spaces / https"));
-        assert!(!yaml.lines().any(|l| l.starts_with("  ")), "折り返しの継続行がある: {yaml}");
-    }
-
-    #[test]
-    fn 棚の必須項目が欠けたら拒否する() {
-        let ok = "title: t\ntype: knowledge\ntags:\n- 数学\ntopic: 数学\nlearned: 2026-10-23\nsource: 教科書";
-        assert!(validate_shelf(&shelf_fm(ok)).is_ok());
-        for missing in ["topic", "learned", "source"] {
-            let yaml: String = ok
-                .lines()
-                .filter(|l| !l.starts_with(&format!("{missing}:")))
-                .collect::<Vec<_>>()
-                .join("\n");
-            assert!(validate_shelf(&shelf_fm(&yaml)).is_err(), "{missing}が無いのに通った");
-        }
-        assert!(validate_shelf(&shelf_fm(&ok.replace("title: t", "title: ''"))).is_err());
-        assert!(validate_shelf(&shelf_fm(&ok.replace("tags:\n- 数学", "tags: []"))).is_err());
-    }
-
-    #[test]
-    fn 棚の退避名はlearnedかdateの日付を使う() {
-        assert_eq!(shelf_history_label(&shelf_fm("learned: '2026-10-21'")), "2026-10-21");
-        assert_eq!(
-            shelf_history_label(&shelf_fm("date: 2026-10-17T15:00:55+09:00")),
-            "2026-10-17"
-        );
-        assert_eq!(shelf_history_label(&shelf_fm("title: t")), "unknown");
-    }
-
-    #[test]
-    fn 棚の退避先に同名があれば連番を付ける() {
-        let dir = std::env::temp_dir().join(format!("shiori-save-shelf-history-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let first = shelf_history_destination(&dir, "math-hyperreal", "2026-10-17");
-        assert_eq!(first.file_name().unwrap(), "math-hyperreal-2026-10-17.md");
-        std::fs::write(&first, "既存").unwrap();
-        let second = shelf_history_destination(&dir, "math-hyperreal", "2026-10-17");
-        assert_eq!(second.file_name().unwrap(), "math-hyperreal-2026-10-17-2.md");
-        std::fs::write(&second, "既存").unwrap();
-        let third = shelf_history_destination(&dir, "math-hyperreal", "2026-10-17");
-        assert_eq!(third.file_name().unwrap(), "math-hyperreal-2026-10-17-3.md");
-        // 既存の退避は書き換えない。
-        assert_eq!(std::fs::read_to_string(&first).unwrap(), "既存");
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn 棚のファイル名はmdで隠しファイルでないこと() {
-        assert_eq!(shelf_file_name(Path::new("x/math-a.md")).unwrap(), "math-a.md");
-        assert!(shelf_file_name(Path::new("x/math-a.txt")).is_err());
-        assert!(shelf_file_name(Path::new("x/.math-a.md")).is_err());
     }
 
 }
