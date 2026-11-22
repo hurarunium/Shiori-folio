@@ -3100,70 +3100,6 @@ fn list_pending_items_blocking() -> Result<PendingItemsDto, String> {
     Ok(PendingItemsDto { tags, projects, inbox })
 }
 
-// tags.yaml/projects.yamlの、`  - {key_field}: {key_value}`で始まるブロックの
-// 行範囲([開始行, 終了行))を返す。終了行は次の`  - `行、または末尾。
-fn find_yaml_list_item_range(lines: &[String], key_field: &str, key_value: &str) -> Option<(usize, usize)> {
-    let marker = format!("- {key_field}:");
-    let mut start = None;
-    for (i, line) in lines.iter().enumerate() {
-        let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix(&marker) {
-            let value = rest.trim().trim_matches('"').trim_matches('\'');
-            if value == key_value {
-                start = Some(i);
-                break;
-            }
-        }
-    }
-    let start = start?;
-    let mut end = lines.len();
-    for (i, line) in lines.iter().enumerate().skip(start + 1) {
-        if line.trim_start().starts_with("- ") && line.starts_with("  -") {
-            end = i;
-            break;
-        }
-    }
-    Some((start, end))
-}
-
-fn rewrite_yaml_status(path: &Path, key_field: &str, key_value: &str, new_status: &str) -> Result<(), String> {
-    let text =
-        std::fs::read_to_string(path).map_err(|e| format!("{}の読み込みに失敗: {e}", path.display()))?;
-    let mut lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
-    let (start, end) = find_yaml_list_item_range(&lines, key_field, key_value)
-        .ok_or_else(|| "対象のエントリが見つかりませんでした。".to_string())?;
-
-    let status_line_idx = (start..end)
-        .find(|&i| lines[i].trim_start().starts_with("status:"))
-        .ok_or_else(|| "statusフィールドが見つかりませんでした。".to_string())?;
-    let indent_len = lines[status_line_idx].len() - lines[status_line_idx].trim_start().len();
-    lines[status_line_idx] = format!("{}status: {new_status}", " ".repeat(indent_len));
-
-    let mut new_text = lines.join("\n");
-    if text.ends_with('\n') {
-        new_text.push('\n');
-    }
-    // 途中で止まっても台帳が半端な内容にならないよう、一時ファイル経由で置き換える。
-    tasks::write_atomically(path, &new_text)
-}
-
-fn remove_yaml_list_item(path: &Path, key_field: &str, key_value: &str) -> Result<(), String> {
-    let text =
-        std::fs::read_to_string(path).map_err(|e| format!("{}の読み込みに失敗: {e}", path.display()))?;
-    let lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
-    let (start, end) = find_yaml_list_item_range(&lines, key_field, key_value)
-        .ok_or_else(|| "対象のエントリが見つかりませんでした。".to_string())?;
-
-    let mut remaining: Vec<String> = lines[..start].to_vec();
-    remaining.extend_from_slice(&lines[end..]);
-
-    let mut new_text = remaining.join("\n");
-    if !remaining.is_empty() && text.ends_with('\n') {
-        new_text.push('\n');
-    }
-    tasks::write_atomically(path, &new_text)
-}
-
 fn pending_action_to_status(action: &str) -> Result<&'static str, String> {
     match action {
         "confirm" => Ok("confirmed"),
@@ -3178,12 +3114,14 @@ async fn resolve_pending_tag(canonical: String, action: String) -> Result<(), St
 }
 
 fn resolve_pending_tag_blocking(canonical: String, action: String) -> Result<(), String> {
-    let path = library_root().join("_system").join("tags.yaml");
+    let root = library_root();
     if action == "reject" {
-        return remove_yaml_list_item(&path, "canonical", &canonical);
+        return library_store::registry::remove_item(&root, library_store::registry::TAGS_YAML, "canonical", &canonical)
+            .map_err(|e| e.to_string());
     }
     let status = pending_action_to_status(&action)?;
-    rewrite_yaml_status(&path, "canonical", &canonical, status)
+    library_store::registry::set_status(&root, library_store::registry::TAGS_YAML, "canonical", &canonical, status)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -3192,12 +3130,14 @@ async fn resolve_pending_project(id: String, action: String) -> Result<(), Strin
 }
 
 fn resolve_pending_project_blocking(id: String, action: String) -> Result<(), String> {
-    let path = library_root().join("_system").join("projects.yaml");
+    let root = library_root();
     if action == "reject" {
-        return remove_yaml_list_item(&path, "id", &id);
+        return library_store::registry::remove_item(&root, library_store::registry::PROJECTS_YAML, "id", &id)
+            .map_err(|e| e.to_string());
     }
     let status = pending_action_to_status(&action)?;
-    rewrite_yaml_status(&path, "id", &id, status)
+    library_store::registry::set_status(&root, library_store::registry::PROJECTS_YAML, "id", &id, status)
+        .map_err(|e| e.to_string())
 }
 
 // inboxファイルのfrontmatter内、`review_status:`行を書き換える(無ければ
@@ -5532,9 +5472,8 @@ mod tests {
         println!("アイドル自動停止OK");
     }
 
-    // 要確認UI(Phase 8)のtags.yaml/projects.yamlテキスト書き換えが、対象
-    // エントリだけを書き換え、先頭コメントや他のエントリを壊さないことを
-    // 確認する軽量テスト(実ファイルではなくtempdir上のコピーで検証)。
+    // 要確認UIのinboxの書き換えのテスト用。tags.yaml/projects.yamlの書き換えのテストは
+    // library_store(registry)へ移した。
     fn write_temp_yaml(name: &str, content: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "shiori_test_pending_yaml_{}_{}",
@@ -5547,29 +5486,6 @@ mod tests {
         path
     }
 
-    const SAMPLE_TAGS_YAML: &str = "# ヘッダーコメント1行目\n# ヘッダーコメント2行目\ntags:\n  - canonical: 詩織\n    aliases: [shiori]\n    status: confirmed\n  - canonical: 新タグ\n    aliases: []\n    status: pending\n";
-
-    #[test]
-    fn rewrite_yaml_status_updates_only_target_entry() {
-        let path = write_temp_yaml("rewrite", SAMPLE_TAGS_YAML);
-        rewrite_yaml_status(&path, "canonical", "新タグ", "confirmed").unwrap();
-        let result = std::fs::read_to_string(&path).unwrap();
-        assert!(result.contains("# ヘッダーコメント1行目"), "先頭コメントが保持されていない");
-        assert!(result.contains("canonical: 詩織\n    aliases: [shiori]\n    status: confirmed"), "既存エントリが変化した");
-        assert!(result.contains("canonical: 新タグ\n    aliases: []\n    status: confirmed"), "対象エントリが書き換わっていない");
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
-    }
-
-    #[test]
-    fn remove_yaml_list_item_removes_only_target_entry() {
-        let path = write_temp_yaml("remove", SAMPLE_TAGS_YAML);
-        remove_yaml_list_item(&path, "canonical", "新タグ").unwrap();
-        let result = std::fs::read_to_string(&path).unwrap();
-        assert!(result.contains("# ヘッダーコメント1行目"), "先頭コメントが保持されていない");
-        assert!(result.contains("canonical: 詩織"), "既存エントリが消えた");
-        assert!(!result.contains("新タグ"), "対象エントリが削除されていない");
-        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
-    }
 
     #[test]
     fn rewrite_inbox_review_status_inserts_when_absent() {

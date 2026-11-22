@@ -22,7 +22,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use sha2::{Digest, Sha256};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use shiori_folio_lib::shiori_log;
@@ -132,30 +132,6 @@ struct Frontmatter {
     extra: BTreeMap<String, serde_yaml::Value>,
 }
 
-#[derive(Debug, Deserialize)]
-struct ProjectsFile {
-    #[serde(default)]
-    projects: Vec<ProjectEntry>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ProjectEntry {
-    id: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct TagsFile {
-    #[serde(default)]
-    tags: Vec<TagEntry>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TagEntry {
-    canonical: String,
-    #[serde(default)]
-    aliases: Vec<String>,
-}
-
 fn main() -> Result<()> {
     let root = project_root();
     shiori_log::init(
@@ -214,9 +190,6 @@ fn run() -> Result<()> {
     if !root.is_dir() {
         bail!("詩織のSSDが接続されていません(library/が見つかりません)");
     }
-    let system_dir = root.join("_system");
-    let projects_yaml = system_dir.join("projects.yaml");
-    let tags_yaml = system_dir.join("tags.yaml");
 
     let content = std::fs::read_to_string(&source)
         .with_context(|| format!("{}の読み込みに失敗", source.display()))?;
@@ -231,15 +204,15 @@ fn run() -> Result<()> {
         fm.tags = fm
             .tags
             .iter()
-            .map(|raw| normalize_tag(&tags_yaml, raw, &mut newly_pending_tags))
+            .map(|raw| normalize_tag(&root, raw, &mut newly_pending_tags))
             .collect::<Result<Vec<_>>>()?;
-        return save_asset(&root, &projects_yaml, &source, fm, &body, copy_mode, newly_pending_tags);
+        return save_asset(&root, &source, fm, &body, copy_mode, newly_pending_tags);
     }
 
     // 共通記憶MDは、固定の保存先への丸ごと上書き・競合検知・旧版退避という
     // 通常記事と異なる流れを持つため、専用の経路で処理する。
     if fm.sub_kind.as_deref() == Some(MEMORY_KIND) {
-        return save_memory(&root, &projects_yaml, &tags_yaml, &source, fm, &body, expect_updated);
+        return save_memory(&root, &source, fm, &body, expect_updated);
     }
     if expect_updated.is_some() {
         bail!("--expect-updatedはkind: memoryの更新専用です");
@@ -256,7 +229,7 @@ fn run() -> Result<()> {
     fm.tags = fm
         .tags
         .iter()
-        .map(|raw| normalize_tag(&tags_yaml, raw, &mut newly_pending_tags))
+        .map(|raw| normalize_tag(&root, raw, &mut newly_pending_tags))
         .collect::<Result<Vec<_>>>()?;
 
     let (dest_dir, inbox_reason) = match validate(&fm) {
@@ -264,7 +237,7 @@ fn run() -> Result<()> {
             fm.reason = Some(reason.clone());
             (root.join("00-inbox"), Some(reason))
         }
-        None => (decide_destination(&root, &fm, &projects_yaml)?, None),
+        None => (decide_destination(&root, &fm)?, None),
     };
 
     std::fs::create_dir_all(&dest_dir)
@@ -333,7 +306,7 @@ fn validate(fm: &Frontmatter) -> Option<String> {
 // 書き込みを行うAI(Claude Code)が自律的に行う前提(人間はtypeの値を直接
 // 参照・指定しない)。このCLIは決定されたtypeを機械的にフォルダへ変換する
 // だけの決定的ロジックを担う。
-fn decide_destination(root: &Path, fm: &Frontmatter, projects_yaml: &Path) -> Result<PathBuf> {
+fn decide_destination(root: &Path, fm: &Frontmatter) -> Result<PathBuf> {
     let project = fm.project.as_deref().map(str::trim).filter(|p| !p.is_empty());
 
     match fm.kind.as_deref().expect("validateを通過済みのためSome") {
@@ -341,7 +314,7 @@ fn decide_destination(root: &Path, fm: &Frontmatter, projects_yaml: &Path) -> Re
         // さらにサブフォルダへ分ける(詩織Ver3.1、journal廃止統合)。
         "project" => match project {
             Some(p) => {
-                ensure_project_registered(projects_yaml, p)?;
+                ensure_project_registered(root, p)?;
                 let sub_kind = fm.sub_kind.as_deref().expect("validateを通過済みのためSome");
                 Ok(root.join("10-projects").join(p).join(sub_kind))
             }
@@ -353,7 +326,7 @@ fn decide_destination(root: &Path, fm: &Frontmatter, projects_yaml: &Path) -> Re
         // projectと同じくkindでjournal/resourceに分ける。
         "area" => match project {
             Some(p) => {
-                ensure_project_registered(projects_yaml, p)?;
+                ensure_project_registered(root, p)?;
                 let sub_kind = fm.sub_kind.as_deref().expect("validateを通過済みのためSome");
                 Ok(root.join("20-areas").join(p).join(sub_kind))
             }
@@ -378,65 +351,17 @@ fn decide_destination(root: &Path, fm: &Frontmatter, projects_yaml: &Path) -> Re
     }
 }
 
-// frontmatterから取り出したYAMLのスカラー値を、コロンや日本語を含む文字列でも
-// 壊れないよう安全にクォートしてシリアライズする。
-fn yaml_scalar(s: &str) -> Result<String> {
-    Ok(serde_yaml::to_string(s)?.trim_end().to_string())
-}
-
-// projects.yamlに指定idが存在するかを調べる。存在しなければ末尾に
-// status: pendingで追記登録する。既存ファイルの先頭コメント等を保つため、
-// パース→丸ごと再シリアライズはせず、追記のみで済ませる。
-//
-// 【Ver3.0で変更】旧30-knowledgeのdomain逆引きが不要になった(30-resourcesは
-// project別サブフォルダ構成のため)ため、戻り値のdomainは廃止した。
-fn ensure_project_registered(projects_yaml: &Path, id: &str) -> Result<()> {
-    let text = std::fs::read_to_string(projects_yaml)
-        .with_context(|| format!("{}の読み込みに失敗", projects_yaml.display()))?;
-    let parsed: ProjectsFile = serde_yaml::from_str(&text)
-        .with_context(|| format!("{}の解析に失敗", projects_yaml.display()))?;
-
-    if parsed.projects.iter().any(|p| p.id == id) {
-        return Ok(());
-    }
-
-    let mut f = std::fs::OpenOptions::new()
-        .append(true)
-        .open(projects_yaml)
-        .with_context(|| format!("{}への追記オープンに失敗", projects_yaml.display()))?;
-    writeln!(f, "  - id: {}\n    status: pending", yaml_scalar(id)?)?;
+// projects.yamlに指定idが無ければ、末尾にstatus: pendingで登録する。
+// 台帳の読み書きは、library_store::registry(コメントを保つテキスト操作、版つきの置き換え)。
+fn ensure_project_registered(root: &Path, id: &str) -> Result<()> {
+    library_store::registry::ensure_project(root, id)?;
     Ok(())
 }
 
 // tags.yamlのcanonical/aliasesと照合し、一致すればcanonical表記を返す。
-// 一致しなければ末尾にstatus: pendingで自己登録し、そのままの表記を返す。
-fn normalize_tag(tags_yaml: &Path, raw: &str, newly_pending: &mut Vec<String>) -> Result<String> {
-    let text = std::fs::read_to_string(tags_yaml)
-        .with_context(|| format!("{}の読み込みに失敗", tags_yaml.display()))?;
-    let parsed: TagsFile = serde_yaml::from_str(&text)
-        .with_context(|| format!("{}の解析に失敗", tags_yaml.display()))?;
-
-    for entry in &parsed.tags {
-        if entry.canonical == raw || entry.aliases.iter().any(|a| a == raw) {
-            return Ok(entry.canonical.clone());
-        }
-    }
-    // 同一実行内で同じ新規タグが複数回出てきても二重登録しない。
-    if newly_pending.contains(&raw.to_string()) {
-        return Ok(raw.to_string());
-    }
-
-    let mut f = std::fs::OpenOptions::new()
-        .append(true)
-        .open(tags_yaml)
-        .with_context(|| format!("{}への追記オープンに失敗", tags_yaml.display()))?;
-    writeln!(
-        f,
-        "  - canonical: {}\n    aliases: []\n    status: pending",
-        yaml_scalar(raw)?
-    )?;
-    newly_pending.push(raw.to_string());
-    Ok(raw.to_string())
+// 一致しなければstatus: pendingで自己登録し、そのままの表記を返す。
+fn normalize_tag(root: &Path, raw: &str, newly_pending: &mut Vec<String>) -> Result<String> {
+    Ok(library_store::registry::normalize_tag(root, raw, newly_pending)?)
 }
 
 // 先頭`---`〜次の`---`をfrontmatterとしてパースし、(frontmatter, 本文)を返す。
@@ -597,8 +522,6 @@ fn write_atomically(dest: &Path, content: &str) -> Result<()> {
 // 何も書かずに終了する(ロックは使わない。同時保存しない運用が前提)。
 fn save_memory(
     root: &Path,
-    projects_yaml: &Path,
-    tags_yaml: &Path,
     source: &Path,
     mut fm: Frontmatter,
     body: &str,
@@ -664,10 +587,10 @@ fn save_memory(
     fm.tags = fm
         .tags
         .iter()
-        .map(|raw| normalize_tag(tags_yaml, raw, &mut newly_pending_tags))
+        .map(|raw| normalize_tag(root, raw, &mut newly_pending_tags))
         .collect::<Result<Vec<_>>>()?;
     if matches!(fm.kind.as_deref(), Some("project" | "area")) {
-        ensure_project_registered(projects_yaml, &key)?;
+        ensure_project_registered(root, &key)?;
     }
     // 保存先(40-profile/など)がまだ無い場合に備える。
     let dest_dir = dest.parent().ok_or_else(|| anyhow!("保存先の親フォルダの取得に失敗"))?;
@@ -953,7 +876,7 @@ fn secret_name_reason(file_name: &str) -> Option<&'static str> {
 
 // 素材のtype/projectから保存先の`files/`を決める。mdと違い不備はinboxへ逃がさず
 // エラーにする(素材だけがinboxに置かれ、実体と説明の対応が崩れるのを防ぐ)。
-fn decide_asset_destination(root: &Path, fm: &Frontmatter, projects_yaml: &Path) -> Result<PathBuf> {
+fn decide_asset_destination(root: &Path, fm: &Frontmatter) -> Result<PathBuf> {
     if fm.title.as_deref().map(str::trim).unwrap_or("").is_empty() {
         bail!("titleが空です");
     }
@@ -966,7 +889,7 @@ fn decide_asset_destination(root: &Path, fm: &Frontmatter, projects_yaml: &Path)
             let p = project.ok_or_else(|| {
                 anyhow!("typeがproject/areaの素材にはprojectが必要です(保存先が決まりません)")
             })?;
-            ensure_project_registered(projects_yaml, p)?;
+            ensure_project_registered(root, p)?;
             let top = if fm.kind.as_deref() == Some("project") { "10-projects" } else { "20-areas" };
             Ok(root.join(top).join(p).join("files"))
         }
@@ -1012,7 +935,6 @@ fn unique_asset_destination(dir: &Path, asset_name: &str) -> (PathBuf, PathBuf) 
 
 fn save_asset(
     root: &Path,
-    projects_yaml: &Path,
     meta_source: &Path,
     mut fm: Frontmatter,
     body: &str,
@@ -1033,7 +955,7 @@ fn save_asset(
         bail!("秘密情報の可能性があるため取り込めません({reason}): {asset_name}");
     }
 
-    let dest_dir = decide_asset_destination(root, &fm, projects_yaml)?;
+    let dest_dir = decide_asset_destination(root, &fm)?;
     std::fs::create_dir_all(&dest_dir)
         .with_context(|| format!("{}の作成に失敗", dest_dir.display()))?;
     let (asset_dest, meta_dest) = unique_asset_destination(&dest_dir, &asset_name);
@@ -1156,8 +1078,6 @@ mod tests {
         };
         let result = save_memory(
             &root,
-            &root.join("projects.yaml"),
-            &root.join("tags.yaml"),
             &dest,
             fm,
             "新しい本文\n",

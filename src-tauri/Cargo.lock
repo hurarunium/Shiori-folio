@@ -2341,6 +2341,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "library_store"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_yaml",
+ "sha2",
+]
+
+[[package]]
 name = "libredox"
 version = "0.1.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3817,6 +3826,7 @@ dependencies = [
  "cpal",
  "fs4",
  "hound",
+ "library_store",
  "png 0.17.16",
  "rmcp",
  "rodio",
