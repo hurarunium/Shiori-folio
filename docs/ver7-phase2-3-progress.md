@@ -52,3 +52,10 @@
 - CLI: 警告と、外した項目の記録を、標準エラーに表示する。
 - 試験: `library_store` 127件、サーバー 結合21件、通し試験 33件。
 
+## Phase 3 の下書き(2026-11-22 夕方)
+
+- 新しい道具: サーバーの `GET /api/v1/list?path=…`(フォルダのファイル一覧。名前の降順=日誌なら新しい順)と、MCPの `list_documents`。`work-start` が「直近の日誌」を探すために必要だった(`read_document` は、パスが分かるものしか読めないため)。`library_store::fsx::list_entries`。試験: `library_store` 128件、サーバー結合22件、通し試験36件。
+- 下書き(`docs/ver7-drafts/`。移行の日に切り替える): skill 3つ(`work-start`・`session-close`・`completion-report`。現行の本体から、変更する節だけを差し替えた全文)、AIの入口3つ(`~/.claude/CLAUDE.md`・`~/.codex/AGENTS.md`・リポジトリの `AGENTS.md`)、`_system/CLAUDE.md` と `memory-global.md`・`library-organizing` の改訂案。
+- **未解決の課題**(ふらるの判断が要る): skill の本体・`_system/` の資料・libraryの中のスクリプトを、Ver7.0でどう更新するか(サーバーの窓口に、これらを書く道が無い)。案と推奨は `docs/ver7-drafts/library-system/system-CLAUDE-changes.md` の「11」。
+- 未確認: 下書きの手順を、実際のセッションで通した確認(サーバーが余りのPCへ配置されたあと)。
+
