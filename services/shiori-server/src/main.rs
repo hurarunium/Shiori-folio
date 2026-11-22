@@ -6,6 +6,9 @@
 //!   shiori-server token revoke <端末名> --data <DIR>
 //!   shiori-server token list --data <DIR>
 //!   shiori-server backup-verify <zip> --dest <空のDIR> [--against-library <DIR>] [--against-tasks <DIR>]
+//!   shiori-server migrate-plan <元のlibrary> <行き先>     (予行。何も書かない。報告を出す)
+//!   shiori-server migrate-apply <元のlibrary> <行き先>    (3つの段階を、照合しながら適用する。行き先は空の場所)
+//!   shiori-server migrate-verify <元のlibrary> <行き先>   (全体の照合をやり直す)
 //!
 //! 待ち受けは設定の `bind` だけ。0.0.0.0 などの全部のアドレスは拒否する。窓口の一覧は `src/api.rs`。
 
@@ -92,7 +95,39 @@ fn run(args: &[String]) -> Result<(), String> {
             }
         }
         Some("backup-verify") => backup_verify(&pos, &o),
-        _ => Err("使い方: shiori-server serve|token|backup-verify …(ファイル先頭の説明を参照)".into()),
+        Some(cmd @ ("migrate-plan" | "migrate-apply" | "migrate-verify")) => migrate(cmd, &pos),
+        _ => Err("使い方: shiori-server serve|token|backup-verify|migrate-plan|migrate-apply|migrate-verify …(ファイル先頭の説明を参照)".into()),
+    }
+}
+
+/// 移行ツール(詩織Ver7.0 Phase 5-B)。元のlibraryは書き換えない。
+fn migrate(cmd: &str, pos: &[String]) -> Result<(), String> {
+    let src = PathBuf::from(pos.first().ok_or("元のlibraryのパスが必要")?);
+    let dst = PathBuf::from(pos.get(1).ok_or("行き先のパスが必要")?);
+    match cmd {
+        "migrate-plan" => {
+            let report = library_store::migrate::plan(&src, &dst)?;
+            print!("{}", report.render());
+            if report.warnings.is_empty() { Ok(()) } else { Err("警告があります(このままでは、適用できません)".into()) }
+        }
+        "migrate-apply" => {
+            let report = library_store::migrate::apply(&src, &dst)?;
+            print!("{}", report.render());
+            println!("適用して、3つの段階の照合に通りました: {}", dst.display());
+            Ok(())
+        }
+        _ => {
+            let problems = library_store::migrate::verify(&src, &dst)?;
+            if problems.is_empty() {
+                println!("照合に通りました: すべて合っています");
+                Ok(())
+            } else {
+                for p in problems.iter().take(100) {
+                    println!("  - {p}");
+                }
+                Err(format!("照合に通りません({}件)", problems.len()))
+            }
+        }
     }
 }
 

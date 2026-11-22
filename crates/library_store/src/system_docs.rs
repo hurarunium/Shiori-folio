@@ -591,7 +591,7 @@ updated: \"2026-10-10T00:00:00+09:00\"
 
     #[test]
     fn v7では置き場が変わりmemoryは20_projectsと10_commonから出る() {
-        let (base, library, root) = fixture("v7");
+        let (base, library, _root) = fixture("v7");
         std::fs::create_dir_all(library.join("10-common")).unwrap();
         std::fs::write(library.join("10-common/memory-global.md"), "---
 updated: 2026-11-01T00:00:00+09:00

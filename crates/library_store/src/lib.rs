@@ -8,6 +8,7 @@ pub mod handoff;
 pub mod inbox;
 pub mod journal;
 pub mod layout;
+pub mod migrate;
 pub mod log;
 pub mod notes;
 pub mod pending;
