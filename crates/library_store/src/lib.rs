@@ -2,5 +2,6 @@
 //! Tauriに依存しない。アプリ・CLI・サーバーが同じ書き方で書くための土台。
 
 pub mod fsx;
+pub mod registry;
 
 pub use fsx::{Cond, StoreError, Written};

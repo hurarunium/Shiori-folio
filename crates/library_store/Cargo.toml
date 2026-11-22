@@ -6,3 +6,5 @@ description = "詩織のlibraryへの書き込みを1か所に集める部品(Ta
 
 [dependencies]
 sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
