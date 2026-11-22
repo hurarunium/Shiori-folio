@@ -3,6 +3,7 @@
 
 pub mod fsx;
 pub mod inbox;
+pub mod notes;
 pub mod registry;
 
 pub use fsx::{Cond, StoreError, Written};
