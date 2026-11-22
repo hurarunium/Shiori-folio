@@ -127,6 +127,18 @@ def run_all(S, P, exes, token, port):
     code, d, _ = cli(exes["save"], "--expect-updated", updated, write("mem.md", mem("記憶2")))
     check("memory: 合っていれば更新でき、旧版が退避される", code == 0 and d and d["history_file"], d)
 
+    # 外した項目は、日誌へ自動で記録される。長さの上限による警告は出ない
+    upd = d["updated"] if d else ""
+    mem_items = lambda items: f"---\ntitle: shiori memory\ntype: project\nkind: memory\nproject: shiori\ntags: [詩織]\n---\n## やること\n\n{items}"
+    code, d, _ = cli(exes["save"], "--expect-updated", upd, write("mem.md", mem_items("- A項目 `a.rs` を直す(11/22)\n- Macで `cargo build` を試して、ビルド時間を測る(11/21)\n")))
+    upd = d["updated"] if d else ""
+    code, d, out = cli(exes["save"], "--expect-updated", upd, write("mem.md", mem_items("- A項目 `a.rs` を直す(11/22)\n")))
+    check("memory: 外した項目が、日誌へ自動で記録される", code == 0 and d and d["removed_items"] == 1 and "日誌に記録しました" in out, out[:160])
+    day_files = list((S / "library/20-projects/shiori/journal").glob("*.md"))
+    check("memory: 日誌に「memoryから外した項目」の節ができる",
+          any("### memoryから外した項目" in f.read_text(encoding="utf-8") and "ビルド時間を測る" in f.read_text(encoding="utf-8") for f in day_files))
+    check("memory: 長さの上限の警告は出ない", d and all(not isinstance(w, str) for w in d["warnings"]), d)
+
     # ---- 棚 ----
     code, d, _ = cli(exes["save"], write("math.md", "---\ntitle: 数学\ntype: knowledge\ntags: [数学]\ntopic: 数学\nlearned: 2026-11-01\nsource: 教科書\n---\n棚\n"))
     check("棚: 知識の棚へ保存される", code == 0 and d and d["destination"] == "knowledge/math.md", d)
@@ -149,9 +161,12 @@ def run_all(S, P, exes, token, port):
     check("日誌: 追記でき、見出しに端末とAIが付く", code == 0 and d and d["heading"].endswith("win・claude-code") and d["toc_added"], d)
     code, d, _ = cli(exes["save"], "--journal", "--project", "shiori", write("j2.md", "夕方\n"))
     text = (S / "library/20-projects/shiori/journal" / (d["day"] + ".md")).read_text(encoding="utf-8") if d else ""
-    check("日誌: 2回目は末尾に節が足される", code == 0 and text.count("\n## ") == 2 and "昼に実装した。" in text and "夕方" in text, text[-120:])
+    check("日誌: 2回目は末尾に節が足される", code == 0 and text.count("\n## ") >= 3 and "昼に実装した。" in text and "夕方" in text, text[-120:])
     toc = (S / "library/10-common/journal" / (d["day"] + ".md")).read_text(encoding="utf-8") if d else ""
     check("日誌: 全体の日誌の目次に1行入る", "[shiori] 実装した" in toc and toc.count("[shiori]") == 1, toc[-150:])
+
+    code, d, out = cli(exes["save"], "--journal", "--project", "shiori", write("w.md", "### 次にやること\n\n- 設計を読む\n"))
+    check("日誌: 書き方の規則の警告が表示され、保存は止まらない", code == 0 and "警告: [J1]" in out and d and d["warnings"], out[:160])
 
     # ---- タスク ----
     code, d, _ = cli(exes["task"], "folder", "add", "詩織")
