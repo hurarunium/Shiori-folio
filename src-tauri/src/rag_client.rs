@@ -174,6 +174,24 @@ pub struct SearchLibraryResultItem {
     // 新旧の記事を辿るための手がかり。
     #[serde(default)]
     pub related: Vec<String>,
+    // サーバー経由のとき、サーバーが添える属性と冒頭の文(詩織Ver7.0)。手元のRAGは返さない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<ItemPreview>,
+}
+
+/// 一覧に出す、記事の属性と冒頭の文(`library_store::preview::Preview` と同じ形)。
+#[derive(Deserialize, Serialize, Default, Clone)]
+pub struct ItemPreview {
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub project: String,
+    #[serde(default)]
+    pub entry_kind: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub date: String,
 }
 
 // MCPサーバーのsearch_libraryツール向け(詩織Ver2.0設計指示書v3、9章)。

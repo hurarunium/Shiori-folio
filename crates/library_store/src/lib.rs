@@ -13,6 +13,8 @@ pub mod preview;
 pub mod registry;
 pub mod rules;
 pub mod shelf;
+pub mod shelf_view;
+pub mod source_path;
 pub mod tasks;
 
 pub use fsx::{Cond, StoreError, Written};

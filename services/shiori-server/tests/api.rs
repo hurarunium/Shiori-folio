@@ -404,6 +404,44 @@ fn 蔵書の一覧と検索結果に属性と冒頭の文が添えられる() {
 }
 
 #[test]
+fn 棚の一覧と本文を返し一覧に無い名前は読めない() {
+    let e = Env::new();
+    let shelf = e.root.join("knowledge");
+    std::fs::create_dir_all(&shelf).unwrap();
+    std::fs::write(shelf.join("a.md"), "---\ntitle: 超実数\ntopic: 数学\nlearned: '2026-10-17'\n---\n\n本文\n").unwrap();
+    std::fs::write(e.root.join("secret.md"), "秘密").unwrap();
+    let (code, v) = e.win("GET", "/api/v1/shelf", None);
+    assert_eq!((code, v[0]["name"].as_str(), v[0]["title"].as_str(), v[0]["topic"].as_str()), (200, Some("a.md"), Some("超実数"), Some("数学")));
+    let (code, v) = e.win("GET", "/api/v1/shelf/doc?name=a.md", None);
+    assert_eq!(code, 200);
+    assert!(v["content"].as_str().unwrap().contains("本文"));
+    assert_eq!(e.win("GET", "/api/v1/shelf/doc?name=..%2Fsecret.md", None).0, 404);
+    assert_eq!(e.win("GET", "/api/v1/shelf/doc?name=none.md", None).0, 404);
+    assert_eq!(e.win("GET", "/api/v1/shelf/doc", None).0, 400);
+}
+
+#[test]
+fn 参照資料の本文をカテゴリと名前から返し外は読めない() {
+    let e = Env::new();
+    std::fs::create_dir_all(e.lib().join("20-projects/shiori/resource")).unwrap();
+    std::fs::write(e.lib().join("20-projects/shiori/resource/a.md"), "---\ntitle: 資料\n---\n本文").unwrap();
+    std::fs::write(e.lib().join("20-projects/shiori/memory.md"), "---\ntitle: m\n---\nmemory本文").unwrap();
+    std::fs::write(e.root.join("secret.md"), "秘密").unwrap();
+    let (code, v) = e.win("GET", "/api/v1/source?category=20-projects&source=a.md", None);
+    assert_eq!((code, v["path"].as_str()), (200, Some("library/20-projects/shiori/resource/a.md")));
+    assert!(v["content"].as_str().unwrap().contains("本文"));
+    // memory は source が「project/memory.md」
+    let (code, v) = e.win("GET", "/api/v1/source?category=20-projects&source=shiori%2Fmemory.md", None);
+    assert_eq!(code, 200);
+    assert!(v["content"].as_str().unwrap().contains("memory本文"));
+    // 外へは出られない
+    assert_eq!(e.win("GET", "/api/v1/source?category=20-projects&source=..%2F..%2Fsecret.md", None).0, 404);
+    assert_eq!(e.win("GET", "/api/v1/source?category=..&source=secret.md", None).0, 400);
+    assert_eq!(e.win("GET", "/api/v1/source?category=20-projects&source=none.md", None).0, 404);
+    assert_eq!(e.win("GET", "/api/v1/source?category=20-projects", None).0, 400);
+}
+
+#[test]
 fn 蔵書の一覧はragが無ければ503で返る() {
     assert_eq!(Env::new().win("GET", "/api/v1/library-index", None).0, 503);
 }

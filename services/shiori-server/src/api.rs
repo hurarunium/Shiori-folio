@@ -197,6 +197,15 @@ fn route(app: &App, method: &Method, path: &str, url: &str, body: &str, device: 
         (Method::Get, "/api/v1/doc") => doc_get(app, url),
         (Method::Get, "/api/v1/list") => doc_list(app, url),
         (Method::Get, "/api/v1/library-index") => library_index(app),
+        (Method::Get, "/api/v1/source") => source_get(app, url),
+        (Method::Get, "/api/v1/shelf") => (200, json!(library_store::shelf_view::list(&app.roots.knowledge))),
+        (Method::Get, "/api/v1/shelf/doc") => match query_param(url, "name") {
+            None => err(400, "name が必要"),
+            Some(n) => match library_store::shelf_view::read(&app.roots.knowledge, &n) {
+                Ok(content) => (200, json!({"name": n, "content": content})),
+                Err(m) => err(404, &m),
+            },
+        },
         (Method::Put, "/api/v1/doc") => doc_put(app, body),
         (Method::Delete, "/api/v1/doc") => doc_delete(app, url),
         (Method::Post, "/api/v1/save") => save(app, body, device),
@@ -390,6 +399,37 @@ fn search(app: &App, endpoint: &str, body: &str) -> Reply {
             (200, r)
         }
         Err((code, m)) => err(code, &m),
+    }
+}
+
+/// 記事の本文(`GET /api/v1/source?category=<source_category>&source=<source>`)。アプリの参照資料の表示用。
+/// 一覧の `source_category`・`source` から実ファイルを探す(アプリの手元の版と同じ処理)。libraryの外は読まない。
+fn source_get(app: &App, url: &str) -> Reply {
+    let (Some(category), Some(source)) = (query_param(url, "category"), query_param(url, "source")) else {
+        return err(400, "category と source が必要");
+    };
+    // 手元の版と同じ。`..` などは、探し方の側で受け付けない
+    let root = &app.roots.library;
+    let search_root = if category == "uncategorized" { root.clone() } else { root.join(&category) };
+    if category.contains(['/', '\\']) || category == ".." {
+        return err(400, "category が正しくない");
+    }
+    let Some(file) = library_store::source_path::resolve_source_file(&search_root, &source) else {
+        return err(404, "指定された参照資料が見つかりませんでした。");
+    };
+    let (Ok(canon_root), Ok(canon)) = (root.canonicalize(), file.canonicalize()) else {
+        return err(404, "指定された参照資料が見つかりませんでした。");
+    };
+    if !canon.starts_with(&canon_root) {
+        return err(403, "不正なパスが指定されました。");
+    }
+    match std::fs::read(&canon).map(String::from_utf8) {
+        Ok(Ok(content)) => {
+            let rel = canon.strip_prefix(&canon_root).map(|p| p.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+            (200, json!({"path": format!("library/{rel}"), "content": content}))
+        }
+        Ok(Err(_)) => err(415, "UTF-8の文章ではない"),
+        Err(e) => err(500, &format!("読み込みに失敗: {e}")),
     }
 }
 

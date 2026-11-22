@@ -5,6 +5,7 @@
 //! 環境変数 `SHIORI_LOCAL=1` を付けると、`server.json` があっても手元で動く(復旧・比較のため)。
 //! サーバーにつながらないとき、手元の動きへ黙って切り替えない(正本が2つになるのを防ぐ)。
 
+pub mod library;
 pub mod tasks;
 
 use serde_json::Value;

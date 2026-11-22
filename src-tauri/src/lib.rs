@@ -2273,6 +2273,10 @@ async fn get_source_document(source_category: String, source: String) -> Result<
 }
 
 fn get_source_document_blocking(source_category: String, source: String) -> Result<String, String> {
+    if let Some(c) = remote::client() {
+        let v = shiori_client::library::source(&c, &source_category, &source).map_err(remote::message)?;
+        return Ok(v["content"].as_str().unwrap_or_default().to_string());
+    }
     let knowledge_root = library_root();
     let search_root = if source_category == "uncategorized" {
         knowledge_root.clone()
@@ -2498,21 +2502,39 @@ async fn remove_task_folder(folder: String) -> Result<(), String> {
 // 検索だけRAGの`/search_shelf`を使う。
 #[tauri::command]
 async fn list_shelf_docs() -> Result<Vec<shelf::ShelfDocDto>, String> {
-    run_blocking(move || Ok(shelf::list(&shelf_root()))).await
+    run_blocking(move || match remote::client() {
+        Some(c) => remote::decode(shiori_client::library::shelf_list(&c).map_err(remote::message)?),
+        None => Ok(shelf::list(&shelf_root())),
+    })
+    .await
 }
 
 #[tauri::command]
 async fn read_shelf_doc(name: String) -> Result<String, String> {
-    run_blocking(move || shelf::read(&shelf_root(), &name)).await
+    run_blocking(move || match remote::client() {
+        Some(c) => {
+            let v = shiori_client::library::shelf_doc(&c, &name).map_err(remote::message)?;
+            Ok(v["content"].as_str().unwrap_or_default().to_string())
+        }
+        None => shelf::read(&shelf_root(), &name),
+    })
+    .await
 }
 
 // 棚の検索。関連のあるファイル名を、関連度の高い順で返す(リランカーの閾値は/searchと同じ0.3)。
 #[tauri::command]
 async fn search_shelf(query: String) -> Result<Vec<String>, String> {
     run_blocking(move || {
-        let config = app_config()?;
-        let hits = rag_client::search_shelf(config.rag.port, &query, 50, 0, None)
-            .inspect_err(|e| shiori_log::error("RAG", "棚の検索に失敗した", &[("語", &query), ("理由", e)]))?;
+        let hits = match remote::client() {
+            Some(c) => {
+                let body = serde_json::json!({"query": query, "limit": 50, "offset": 0});
+                remote::decode::<Vec<rag_client::SearchShelfResultItem>>(
+                    shiori_client::library::search_shelf(&c, &body).map_err(remote::message)?,
+                )
+            }
+            None => app_config().and_then(|config| rag_client::search_shelf(config.rag.port, &query, 50, 0, None)),
+        }
+        .inspect_err(|e| shiori_log::error("RAG", "棚の検索に失敗した", &[("語", &query), ("理由", e)]))?;
         shiori_log::info(
             "SHELF",
             "棚で検索した",
@@ -2535,8 +2557,10 @@ async fn list_all_knowledge() -> Result<Vec<LibraryFileDto>, String> {
 }
 
 fn list_all_knowledge_blocking() -> Result<Vec<LibraryFileDto>, String> {
-    let config = app_config()?;
-    let files = rag_client::list_all_library(config.rag.port)?;
+    let files = match remote::client() {
+        Some(c) => remote::decode::<Vec<rag_client::LibraryFileItem>>(shiori_client::library::index(&c).map_err(remote::message)?)?,
+        None => rag_client::list_all_library(app_config()?.rag.port)?,
+    };
     Ok(files
         .into_iter()
         .map(|f| LibraryFileDto {
@@ -2612,7 +2636,6 @@ fn search_library_blocking(
     offset: u32,
     filter: LibraryFilterDto,
 ) -> Result<Vec<SearchLibraryResultDto>, String> {
-    let config = app_config()?;
     let rag_filter = rag_client::LibrarySearchFilter {
         project: filter.project.as_deref().filter(|p| !p.is_empty()),
         entry_kind: filter.kind.as_deref().filter(|k| !k.is_empty()),
@@ -2620,8 +2643,20 @@ fn search_library_blocking(
         exclude_stale: !filter.include_stale,
         ..Default::default()
     };
-    let results = rag_client::search_library(config.rag.port, &query, limit, offset, Some(rag_filter), false)
-        .inspect_err(|e| shiori_log::error("RAG", "図書館の検索に失敗した", &[("語", &query), ("理由", e)]))?;
+    // サーバーに接続しているときは、サーバーの検索(属性と冒頭の文つき)を使い、手元のRAGは見ない。
+    let remote_client = remote::client();
+    let results = if let Some(c) = &remote_client {
+        let body = serde_json::json!({
+            "query": query, "limit": limit, "offset": offset,
+            "filter": serde_json::to_value(&rag_filter).map_err(|e| e.to_string())?,
+        });
+        let v = shiori_client::library::search_library(c, &body).map_err(remote::message)?;
+        remote::decode::<Vec<rag_client::SearchLibraryResultItem>>(v)?
+    } else {
+        let config = app_config()?;
+        rag_client::search_library(config.rag.port, &query, limit, offset, Some(rag_filter), false)
+            .inspect_err(|e| shiori_log::error("RAG", "図書館の検索に失敗した", &[("語", &query), ("理由", e)]))?
+    };
     shiori_log::info(
         "LIB",
         "図書館で検索した",
@@ -2635,7 +2670,18 @@ fn search_library_blocking(
     Ok(results
         .into_iter()
         .map(|r| {
-            let preview = read_article_preview(&r.path);
+            // サーバー経由のときは、サーバーが添えた`preview`を使う(手元のファイルは無い)
+            let preview = match &r.preview {
+                Some(p) if remote_client.is_some() => ArticlePreview {
+                    summary: p.summary.clone(),
+                    project: p.project.clone(),
+                    entry_kind: p.entry_kind.clone(),
+                    status: p.status.clone(),
+                    date: p.date.clone(),
+                },
+                _ if remote_client.is_some() => ArticlePreview::default(),
+                _ => read_article_preview(&r.path),
+            };
             SearchLibraryResultDto {
             source: r.source,
             source_category: r.source_category,
