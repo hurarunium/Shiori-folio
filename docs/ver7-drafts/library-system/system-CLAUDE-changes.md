@@ -92,12 +92,23 @@
 
 置き換えの規則: `10-projects/` → `20-projects/` / `20-areas/` → `20-projects/` / `40-profile/memory-global.md` → `10-common/memory-global.md` / `90-archive/10-projects/`・`90-archive/20-areas/` → `90-archive/20-projects/`。
 
-## 11. 未解決の課題(下書きの範囲では、決められないもの)
+## 11. skill の本体・規約の更新(解決済み。2026-11-22 に実装)
 
-**skill の本体(`30-resources/skills/`)・`_system/` の資料・libraryの中のスクリプト(`cross-review.sh`)を、どう更新するか。**
+いまの規約は、`30-resources/skills/`・`_system/` の資料を「ファイルを直接書き込み、索引に入れる(`/reindex_file`)」としている(「配置先の決め方」の3、「skillの本体」の節)。Ver7.0では、**memoryと同じ考え方**で、サーバーの窓口を通して更新する(`shiori-save --doc-get` / `--doc`)。
 
-- いまの規約は、これらを「ファイルを直接書き込み、索引に入れる(`/reindex_file`)」としている(「配置先の決め方」の3、「skillの本体」の節)。
-- Ver7.0では、libraryは端末から見えず、サーバーの窓口には、これらを書く道が無い(`shiori-save`は記事の保存だけ。`PUT /api/v1/doc`は受信箱だけ)。
-- **案**: (A) サーバーの管理用コマンド(`shiori-server doc put`)で、余りのPCから書く。(B) `PUT /api/v1/doc`の許可を、`library/30-resources/skills/`・`library/_system/`(ただし`projects.yaml`・`tags.yaml`・`memory-history/`は除く)へ広げ、`expect_rev`つきで、`read_document`で読んだ版から書き換える。(C) 専用のCLI(`shiori-doc`)を足す。
-- 推奨は(B)か(C)。skillを、AIが自分で直す運用(`skill改善提案`)が、いまもあるため。**ふらるの判断が要る**。
-- `cross-review.sh`: 移行後は、`read_document`で取り出して一時ファイルから動かすか、各端末の`~/.claude/skills/`などへ置き直すかも、あわせて決める。
+**「skillの本体」の節に足す文言(貼れる形)**:
+
+> ### skill・規約の更新(詩織Ver7.0)
+>
+> skillの本体(`30-resources/skills/`)と、規約(`_system/CLAUDE.md`・`_system/library-organizing/`)は、**直接のファイル操作ではなく**、`shiori-save` で更新する。memoryと同じく、「読む → 作業用のファイルで直す → 読んだ版のときだけ保存する → 旧版が退避される」。
+>
+> 1. 読む: `shiori-save --doc-get <path> --out <作業用のファイル>`。本文が作業用のファイルに書かれ、**版(`rev`)**が表示される(`<path>` は `library/30-resources/skills/work-start.md` の形)。
+> 2. 作業用のファイルを、Edit で直す。
+> 3. 書く: `shiori-save --doc <path> --expect-rev <読んだrev> <作業用のファイル>`。新規に作るときは `--expect-rev` を付けない。
+>    - 版が違えば(他のセッションが先に書き換えた)、何も書かずに断られる。読み直して、その内容に変更を反映してから、もう一度書く。
+>    - 上書きの前に、旧版が `_system/doc-history/` へ退避される(同じパスで直近3世代)。索引の対象外なので、検索には出ない。
+>    - `shiori-save` は、書けたら作業用のファイルを消す。続けて直すときは、読み直して、新しい版を得る。
+> 4. 書ける範囲: `30-resources/skills/`(新規・上書き)、`_system/CLAUDE.md`・`_system/library-organizing/`(**上書きのみ**。新規は作れない)。台帳(`projects.yaml`・`tags.yaml`)・退避(`memory-history/`・`doc-history/`)・そのほかの置き場には書けない。拡張子は `.md`・`.sh`・`.json`・`.txt`・`.yaml`・`.yml`・`.ps1`・`.py` だけで、秘密情報らしい名前は断られる。
+> 5. 手順書を消す操作は、窓口には無い(消せるのは、受信箱だけ)。
+
+`cross-review.sh` の扱い(移行後に、`read_document` で取り出して一時ファイルから動かすか、各端末の `~/.claude/skills/` などへ置き直すか)は、Phase 3 の残りの決定事項。

@@ -59,3 +59,10 @@
 - **未解決の課題**(ふらるの判断が要る): skill の本体・`_system/` の資料・libraryの中のスクリプトを、Ver7.0でどう更新するか(サーバーの窓口に、これらを書く道が無い)。案と推奨は `docs/ver7-drafts/library-system/system-CLAUDE-changes.md` の「11」。
 - 未確認: 下書きの手順を、実際のセッションで通した確認(サーバーが余りのPCへ配置されたあと)。
 
+## 手順書・規約の更新(2026-11-22 夕方。案B+`shiori-save --doc`)
+
+- `library_store::docs`: 窓口から書ける場所を3か所に限る(受信箱 / `30-resources/skills/`=新規・上書き / `_system/CLAUDE.md`・`_system/library-organizing/`=**上書きのみ**)。台帳・退避・そのほかは不可。拡張子の制限(.md・.sh・.json・.txt・.yaml・.yml・.ps1・.py)と、秘密情報の名前の拒否。上書きは、読んだ版(`rev`)のときだけ。旧版を `_system/doc-history/` へ3世代退避。負けた側(競合)は、退避を残さない。試験9件(`library_store` 137件)。
+- サーバー: `PUT /api/v1/doc` をこの部品へ通した(結合試験 計25件)。削除は、受信箱だけ。
+- CLI: `shiori-save --doc-get <path> --out <ファイル>`(読んで、版を表示)、`shiori-save --doc <path> [--expect-rev <版>] <ファイル>`(書く)。衝突のとき、「先に書き換えました。読み直して…」と案内する。
+- 通し試験 44件(手順書の新規・読み出し・上書き・退避・衝突・台帳の拒否・規約の新規の拒否を追加)。
+

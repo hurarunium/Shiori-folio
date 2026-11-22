@@ -31,13 +31,13 @@ diff (Get-Content E:\portable\library\30-resources\skills\session-close.md) (Get
 ## 移行の日に切り替える手順(案)
 
 1. 両方の端末(WindowsとMac)で、v6.2を閉じ、サーバー・CLI・`mcp_server` のv7.0を配置し、`data/server.json` を置く。
-2. library: `_system/CLAUDE.md`・`memory-global.md`・skillの本体を、この下書きで置き換える(未解決の課題の手段が決まっていること)。
+2. library: `_system/CLAUDE.md`・`memory-global.md`・skillの本体を、この下書きで置き換える(`shiori-save --doc-get` / `--doc` を使う。`memory-global.md` は `shiori-save --expect-updated`)。
 3. 入口: `~/.claude/CLAUDE.md`・`~/.codex/AGENTS.md`(WindowsとMac)、各リポジトリの `AGENTS.md` を置き換える。
 4. 新しいセッションの Claude Code・Codex で、入口のとおりに読めること(`work-start` が、memory・直近の日誌・タスクを読めること)を確かめる。
 
-## 未解決の課題(ふらるの判断が要る)
+## 解決済みの課題: skill の本体・規約の更新
 
-**skill の本体・`_system/` の資料・libraryの中のスクリプトを、どう更新するか。** Ver7.0では、libraryが端末から見えず、サーバーの窓口には、これらを書く道が無い。案と推奨は、`library-system/system-CLAUDE-changes.md` の「11. 未解決の課題」。
+Ver7.0では、libraryが端末から見えず、サーバーの窓口に、skill の本体・規約を書く道が無かった。**memoryと同じ考え方**で、`shiori-save --doc-get <path> --out <作業用のファイル>`(読む。版を表示)と `shiori-save --doc <path> --expect-rev <版> <作業用のファイル>`(読んだ版のときだけ書く。旧版は `_system/doc-history/` に3世代退避)で更新できるようにした(2026-11-22)。範囲・拡張子の制限・貼れる文言は、`library-system/system-CLAUDE-changes.md` の「11」。
 
 ## 確認していないこと
 
