@@ -71,7 +71,7 @@ pub struct Fields {
     pub type_: String,
     pub author: String,
     pub kind: String,
-    /// 検索の新しさに使う日付(memoryは `updated` があればそちら)
+    /// 検索の新しさに使う日付(memory・日誌(journal)は、追記・更新のたびに変わる `updated` があればそちら)
     pub recency_date: String,
     /// 棚の記事なら (cited_from, learned, topic)。学んだ日も分野も無い記事は棚の記事ではない
     pub shelf: Option<(String, String, String)>,
@@ -79,7 +79,8 @@ pub struct Fields {
 
 pub fn read(text: &str) -> Fields {
     let kind = field(&KIND, text);
-    let recency_date = if kind == "memory" {
+    // 日誌(P-16、Ver7.0)は何度も追記されるので、作成日(`date`)だけでは新しさが上がらない
+    let recency_date = if kind == "memory" || kind == "journal" {
         let updated = field(&UPDATED, text);
         if updated.is_empty() { field(&DATE, text) } else { updated }
     } else {
@@ -176,4 +177,38 @@ mod tests {
         let f = read("---\ntitle: t\nsource: https://x\nlearned: 2026-10-20\ntopic: 数学\n---\n");
         assert_eq!(f.shelf, Some(("https://x".into(), "2026-10-20".into(), "数学".into())));
     }
+
+    #[test]
+    fn 日誌も更新日を新しさに使いresourceは作成日のまま() {
+        let journal = "---
+title: j
+type: project
+kind: journal
+project: shiori
+date: 2026-11-22T09:00:00+09:00
+updated: 2026-11-22T17:30:00+09:00
+---
+";
+        assert_eq!(read(journal).recency_date, "2026-11-22T17:30:00+09:00");
+        // updatedが無い日誌(v6.2までのjournal)は、これまでどおり作成日
+        let old = "---
+title: j
+type: area
+kind: journal
+date: 2026-10-01T09:00:00+09:00
+---
+";
+        assert_eq!(read(old).recency_date, "2026-10-01T09:00:00+09:00");
+        // resourceは、updatedがあっても作成日(これまでどおり)
+        let res = "---
+title: r
+type: project
+kind: resource
+date: 2026-11-01T09:00:00+09:00
+updated: 2026-11-22T09:00:00+09:00
+---
+";
+        assert_eq!(read(res).recency_date, "2026-11-01T09:00:00+09:00");
+    }
+
 }

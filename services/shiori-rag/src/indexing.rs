@@ -25,7 +25,8 @@ use crate::store::{Collection, Record};
 use crate::text::read_text;
 
 /// 索引の形の版。Python版の5(memoryのsourceとupdated)までと同じ中身を、新しい置き場で1から始める。
-pub const SCHEMA_VERSION: u32 = 1;
+// 2: 日誌(kind: journal)の新しさに `updated` を使うようにした(Ver7.0、P-16)。版が違うと、次の起動で全部を作り直す
+pub const SCHEMA_VERSION: u32 = 2;
 const STATE_FILE: &str = ".index_state.json";
 const SCHEMA_FILE: &str = ".index_schema";
 const PROGRESS_FILE: &str = ".index_progress.json";
