@@ -49,6 +49,15 @@ export interface ServiceStatus {
   skipped: boolean;
 }
 
+// 詩織のサーバーとの接続の状態(詩織Ver7.0)。`local`は、サーバーを使わず手元で動いている(v6.2と同じ)。
+export interface ServerStatus {
+  state: "local" | "connected" | "unreachable" | "unauthorized" | "error";
+  url: string;
+  version: string;
+  layout: string;
+  message: string;
+}
+
 export function isServiceFailed(s: ServiceStatus): boolean {
   return !s.healthy && !s.skipped;
 }
@@ -231,6 +240,7 @@ export const api = {
   listLibraryProjects: () => invoke<string[]>("list_library_projects"),
   // 申し送りを持つjournalが無ければnull。
   getLatestHandoff: () => invoke<Handoff | null>("get_latest_handoff"),
+  getServerStatus: () => invoke<ServerStatus>("get_server_status"),
   getPortableStorage: () => invoke<{ freeGb: number; totalGb: number }>("get_portable_storage"),
 
   // 記事詳細画面向け(Ver3.0、UI改善4-2節)。frontmatterの構造化フィールドを返す。

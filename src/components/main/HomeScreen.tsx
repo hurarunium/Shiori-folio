@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, type ServiceStatus } from "../../api/tauri";
+import { api, type ServerStatus, type ServiceStatus } from "../../api/tauri";
 import ArticleDetail from "../library/ArticleDetail";
 import { getCategoryMeta, stripSourceExtension } from "../../lib/library";
 import { dueSoonTasks } from "../../lib/tasks";
@@ -81,6 +81,8 @@ function HomeScreen({ pending, onOpenPending }: Props) {
   const [claudeSessions, setClaudeSessions] = useState<number | null>(null);
   const [todayTokens, setTodayTokens] = useState<number | null>(null);
   const [freeGb, setFreeGb] = useState<number | null>(null);
+  // サーバーとの接続の状態。nullは、まだ確かめていない。
+  const [server, setServer] = useState<ServerStatus | null>(null);
   const [opened, setOpened] = useState<OpenedArticle | null>(null);
   const [recentRows, setRecentRows] = useState(RECENT_MAX);
   const recentRef = useRef<HTMLUListElement>(null);
@@ -118,6 +120,10 @@ function HomeScreen({ pending, onOpenPending }: Props) {
       .then(ifCurrent((s) => setTodayTokens(s.daily.find((d) => d.date === todayYmd(new Date()))?.actual ?? 0)))
       .catch(() => undefined);
     api
+      .getServerStatus()
+      .then(ifCurrent(setServer))
+      .catch(() => undefined);
+    api
       .getPortableStorage()
       .then(ifCurrent((s) => setFreeGb(s.freeGb)))
       .catch(() => undefined);
@@ -153,7 +159,10 @@ function HomeScreen({ pending, onOpenPending }: Props) {
 
   const llm = serviceStatuses["llm"];
   const conversationOn = !!llm && !llm.skipped;
-  const sign = signOf(serviceStatuses["embedding"], serviceStatuses["rag"], llm);
+  const onServer = !!server && server.state !== "local";
+  const sign = onServer
+    ? signOfServer(server, llm)
+    : signOf(serviceStatuses["embedding"], serviceStatuses["rag"], llm);
   const dueSoon = dueSoonTasks(tasks, now);
   const pendingTotal = pending
     ? pending.tags.filter((t) => t.status === "pending").length +
@@ -301,10 +310,48 @@ function HomeScreen({ pending, onOpenPending }: Props) {
         <span className="home-screen__status-item">
           今日 {todayTokens === null ? "…" : formatTokens(todayTokens)}トークン
         </span>
-        <span className="home-screen__status-item">SSD 残り {freeGb === null ? "…" : `${Math.round(freeGb)}GB`}</span>
+        {onServer && (
+          <span
+            className={`home-screen__status-item${server.state === "connected" ? "" : " home-screen__status-item--warn"}`}
+            title={server.message || server.url}
+          >
+            サーバー {serverStateLabel(server.state)}
+          </span>
+        )}
+        <span className="home-screen__status-item">
+          {onServer ? "サーバー" : "SSD"} 残り {freeGb === null ? "…" : `${Math.round(freeGb)}GB`}
+        </span>
       </footer>
     </div>
   );
+}
+
+// サーバーに接続しているときの札。検索はサーバーが担うので、つながっていれば開館中。会話(手元のLLM)は別に見る。
+function signOfServer(server: ServerStatus, llm: ServiceStatus | undefined): { open: boolean; detail: string } {
+  switch (server.state) {
+    case "connected":
+      if (!llm || llm.skipped) return { open: true, detail: "サーバーにつながっています" };
+      return { open: true, detail: llm.healthy ? "サーバーにつながっています(会話も使えます)" : "サーバーにつながっています(会話は起動できていません)" };
+    case "unreachable":
+      return { open: false, detail: "サーバーにつながれません(手元の記録には切り替えません)" };
+    case "unauthorized":
+      return { open: false, detail: "サーバーの認証に失敗しました(data/server.json のトークンを確認してください)" };
+    default:
+      return { open: false, detail: "サーバーが想定外の応答を返しました" };
+  }
+}
+
+function serverStateLabel(state: ServerStatus["state"]): string {
+  switch (state) {
+    case "connected":
+      return "接続中";
+    case "unreachable":
+      return "つながりません";
+    case "unauthorized":
+      return "認証エラー";
+    default:
+      return "異常";
+  }
 }
 
 // 開館中/準備中の札。検索(埋め込み・RAG)が使えれば開館中。会話は外部AIモードでオフでも開館中とする。

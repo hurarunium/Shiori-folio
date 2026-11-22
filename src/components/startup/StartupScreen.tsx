@@ -175,7 +175,7 @@ function StartupScreen({ onFinished }: Props) {
               <span className="startup-screen__service-dot" aria-hidden="true" />
               <span className="startup-screen__service-name">
                 {serviceLabel(name)}
-                {state === "skipped" && "(外部AIモードでは使いません)"}
+                {state === "skipped" && (name === "llm" ? "(外部AIモードでは使いません)" : "(サーバーが担います)")}
               </span>
             </div>
           );
