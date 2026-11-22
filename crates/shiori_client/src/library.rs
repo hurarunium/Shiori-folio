@@ -47,6 +47,16 @@ pub fn list(c: &Client, path: &str, limit: usize) -> R {
     c.get(&format!("/api/v1/list?path={}&limit={limit}", encode_component(path)))
 }
 
+/// 規約画面の、libraryにある書類の一覧。
+pub fn system_docs(c: &Client) -> R {
+    c.get("/api/v1/system-docs")
+}
+
+/// 規約画面の書類の本文(`{id, content}`)。
+pub fn system_doc(c: &Client, id: &str) -> R {
+    c.get(&format!("/api/v1/system-docs/read?id={}", encode_component(id)))
+}
+
 /// 要確認の一覧(`{tags, projects, inbox}`)。
 pub fn pending(c: &Client) -> R {
     c.get("/api/v1/pending")

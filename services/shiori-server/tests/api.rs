@@ -478,6 +478,29 @@ fn 要確認の一覧と解決は窓口から行え解決の対象は監査に�
 }
 
 #[test]
+fn 規約画面の書類はv7の置き場から出し許可リスト以外は読めない() {
+    let e = Env::new();
+    std::fs::create_dir_all(e.lib().join("10-common")).unwrap();
+    std::fs::write(e.lib().join("10-common/memory-global.md"), "---\nupdated: 2026-11-01T00:00:00+09:00\n---\n全体のmemory").unwrap();
+    std::fs::create_dir_all(e.lib().join("20-projects/shiori")).unwrap();
+    std::fs::write(e.lib().join("20-projects/shiori/memory.md"), "---\nupdated: 2026-11-22T00:00:00+09:00\n---\nshioriのmemory").unwrap();
+    std::fs::write(e.lib().join("_system/CLAUDE.md"), "# 規約").unwrap();
+    std::fs::write(e.root.join("secret.txt"), "秘密").unwrap();
+    let (code, v) = e.win("GET", "/api/v1/system-docs", None);
+    assert_eq!(code, 200);
+    let ids: Vec<&str> = v.as_array().unwrap().iter().map(|d| d["id"].as_str().unwrap()).collect();
+    assert!(ids.contains(&"memory/global") && ids.contains(&"memory/project/shiori") && ids.contains(&"library/CLAUDE.md"), "{ids:?}");
+    assert!(!ids.iter().any(|i| i.starts_with("prompts/") || i.starts_with("config/")), "手元の設定は出さない");
+    let (code, v) = e.win("GET", "/api/v1/system-docs/read?id=memory%2Fproject%2Fshiori", None);
+    assert_eq!(code, 200);
+    assert!(v["content"].as_str().unwrap().contains("shioriのmemory"));
+    for bad in ["..%2Fsecret.txt", "memory%2Fproject%2F..%2F..%2F..%2Fsecret.txt", "config%2Fconfig.json", "ledger%2Ftags.yaml.bak"] {
+        assert_eq!(e.win("GET", &format!("/api/v1/system-docs/read?id={bad}"), None).0, 404, "{bad}");
+    }
+    assert_eq!(e.win("GET", "/api/v1/system-docs/read", None).0, 400);
+}
+
+#[test]
 fn 蔵書の一覧はragが無ければ503で返る() {
     assert_eq!(Env::new().win("GET", "/api/v1/library-index", None).0, 503);
 }

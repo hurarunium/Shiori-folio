@@ -202,6 +202,15 @@ fn route(app: &App, method: &Method, path: &str, url: &str, body: &str, device: 
             Err(m) => err(500, &m),
         },
         (Method::Post, "/api/v1/pending/resolve") => pending_resolve(app, url),
+        // 規約画面の、libraryにある書類(memory・スキル・規約・台帳・プロフィール)。許可リストのidだけ読める
+        (Method::Get, "/api/v1/system-docs") => (200, json!(library_store::system_docs::list_library(&app.roots.library, app.layout))),
+        (Method::Get, "/api/v1/system-docs/read") => match query_param(url, "id") {
+            None => err(400, "id が必要"),
+            Some(id) => match library_store::system_docs::read_library(&app.roots.library, app.layout, &id) {
+                Ok(content) => (200, json!({"id": id, "content": content})),
+                Err(m) => err(404, &m),
+            },
+        },
         (Method::Get, "/api/v1/source") => source_get(app, url),
         (Method::Get, "/api/v1/shelf") => (200, json!(library_store::shelf_view::list(&app.roots.knowledge))),
         (Method::Get, "/api/v1/shelf/doc") => match query_param(url, "name") {

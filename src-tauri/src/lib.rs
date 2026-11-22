@@ -2386,12 +2386,33 @@ fn reveal_library_asset_blocking(app: tauri::AppHandle, path: String) -> Result<
 // (system_docs.rs参照)。
 #[tauri::command]
 async fn list_system_docs() -> Result<Vec<system_docs::SystemDocDto>, String> {
-    run_blocking(move || Ok(system_docs::list(&library_root(), &project_root()))).await
+    run_blocking(move || match remote::client() {
+        // サーバーに接続しているときは、libraryの書類をサーバーから、プロンプト・設定は手元から(詩織Ver7.0)
+        Some(c) => {
+            let mut docs: Vec<system_docs::SystemDocDto> =
+                remote::decode(shiori_client::library::system_docs(&c).map_err(remote::message)?)?;
+            docs.extend(system_docs::list_local(&project_root()));
+            Ok(docs)
+        }
+        None => Ok(system_docs::list(&library_root(), &project_root())),
+    })
+    .await
 }
 
 #[tauri::command]
 async fn read_system_doc(id: String) -> Result<String, String> {
-    run_blocking(move || system_docs::read(&library_root(), &project_root(), &id)).await
+    run_blocking(move || match remote::client() {
+        // 手元の書類(許可リストにあるid)は手元から、それ以外はサーバーから読む
+        Some(c) => {
+            if id.starts_with("prompts/") || id.starts_with("config/") {
+                return system_docs::read_local(&project_root(), &id);
+            }
+            let v = shiori_client::library::system_doc(&c, &id).map_err(remote::message)?;
+            Ok(v["content"].as_str().unwrap_or_default().to_string())
+        }
+        None => system_docs::read(&library_root(), &project_root(), &id),
+    })
+    .await
 }
 
 // タスクの画面(詩織Ver6.2)向け。読み書きはtasks.rsに集め、CLI(shiori-task)と同じ関数を呼ぶ。

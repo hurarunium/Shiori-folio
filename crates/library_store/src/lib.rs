@@ -15,6 +15,7 @@ pub mod registry;
 pub mod rules;
 pub mod shelf;
 pub mod shelf_view;
+pub mod system_docs;
 pub mod source_path;
 pub mod tasks;
 
