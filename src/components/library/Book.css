@@ -71,6 +71,12 @@
 .book--10-projects {
   background: linear-gradient(160deg, #e0b374, #c4914e);
 }
+.book--20-projects {
+  background: linear-gradient(160deg, #e0b374, #c4914e);
+}
+.book--10-common {
+  background: linear-gradient(160deg, #b3c49f, #8fa37a);
+}
 .book--20-areas {
   background: linear-gradient(160deg, #8fb0c9, #6e8fa8);
 }

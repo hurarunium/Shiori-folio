@@ -32,6 +32,9 @@ const CATEGORY_META: Record<string, CategoryMeta> = {
   "00-inbox": { abbr: "IB", label: "インボックス", hex: "#8C8577" },
   "10-projects": { abbr: "PJ", label: "プロジェクト", hex: "#C4914E" },
   "20-areas": { abbr: "AE", label: "エリア", hex: "#6E8FA8" },
+  // Ver7.0の置き場(10-projects・20-areasを20-projectsへ統合。全体用は10-common)
+  "10-common": { abbr: "CM", label: "共通", hex: "#8FA37A" },
+  "20-projects": { abbr: "PJ", label: "プロジェクト", hex: "#C4914E" },
   "30-resources": { abbr: "RS", label: "リソース", hex: "#C68A5E" },
   "40-profile": { abbr: "PF", label: "プロフィール", hex: "#A67B8F" },
   "90-archive": { abbr: "AC", label: "アーカイブ", hex: "#7A7568" },
@@ -52,8 +55,10 @@ export function getCategoryMeta(sourceCategory: string): CategoryMeta {
 // の配置ルール1〜4の並びと同じ)。
 export const CATEGORY_ORDER = [
   "00-inbox",
+  "10-common",
   "10-projects",
   "20-areas",
+  "20-projects",
   "30-resources",
   "40-profile",
   "90-archive",
