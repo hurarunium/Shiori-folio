@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::{DateTime, FixedOffset};
-use library_store::{fsx, journal, Layout, StoreError};
+use library_store::{docs, fsx, journal, Layout, StoreError};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tiny_http::{Method, Request};
@@ -119,9 +119,9 @@ impl App {
         }
     }
 
-    /// 窓口の `doc` から直接書けるのは、libraryの受信箱だけ。ほかは、規則を通る保存・追記・タスクの窓口から。
-    fn writable(&self, area: Area, rel: &str) -> bool {
-        area == Area::Library && rel.starts_with("00-inbox/")
+    /// 窓口の `doc` から消せるのは、libraryの受信箱だけ(手順書・規約は、消せず、版つきの上書きだけ)。
+    fn deletable(&self, area: Area, rel: &str) -> bool {
+        area == Area::Library && docs::zone_of(rel) == Some(docs::Zone::Inbox)
     }
 
     fn reindex(&self, target: &Reindex) -> bool {
@@ -270,17 +270,24 @@ fn doc_put(app: &App, body: &str) -> Reply {
         Err(r) => return r,
     };
     let Some((area, rel)) = split_area(&d.path) else { return err(400, "パスは library/… knowledge/… tasks/… の形") };
-    if !app.writable(area, rel) {
-        return err(403, "ここには直接書けない(保存・日誌の追記・タスクの窓口を使う)");
-    }
-    let cond = match d.expect_rev {
-        Some(rev) => library_store::Cond::Overwrite { expect_rev: rev },
-        None => library_store::Cond::CreateNew,
+    // 直接書けるのは、受信箱・手順書(`30-resources/skills/`)・規約(`_system/CLAUDE.md` など。上書きだけ)の3か所だけ。
+    // ほかは、規則を通る保存・日誌の追記・タスクの窓口から。上書きは、読んだ版(expect_rev)のときだけ。
+    let zone = if area == Area::Library { docs::zone_of(rel) } else { None };
+    let Some(zone) = zone else {
+        return err(403, "ここには直接書けない(受信箱・手順書・規約だけ。ほかは、保存・日誌の追記・タスクの窓口を使う)");
     };
-    match fsx::write(app.root_of(area), rel, d.content.as_bytes(), cond) {
-        Ok(w) => {
-            let indexed = app.reindex(&Reindex::Library(rel.to_string()));
-            (200, json!({"rev": w.rev, "indexed": indexed}))
+    let stamp = (app.clock)().format("%Y%m%dT%H%M%S").to_string();
+    match docs::put(app.root_of(area), rel, d.content.as_bytes(), d.expect_rev.as_deref(), &stamp) {
+        Ok(p) => {
+            // `_system/` は索引の対象外
+            let indexed = zone != docs::Zone::System && app.reindex(&Reindex::Library(rel.to_string()));
+            (
+                200,
+                json!({
+                    "rev": p.rev, "indexed": indexed, "created": p.created,
+                    "history_file": p.history_rel.as_ref().map(|h| format!("library/{h}")),
+                }),
+            )
         }
         Err(e) => store_err(e),
     }
@@ -289,8 +296,8 @@ fn doc_put(app: &App, body: &str) -> Reply {
 fn doc_delete(app: &App, url: &str) -> Reply {
     let Some(p) = query_param(url, "path") else { return err(400, "path が必要") };
     let Some((area, rel)) = split_area(&p) else { return err(400, "パスは library/… knowledge/… tasks/… の形") };
-    if !app.writable(area, rel) {
-        return err(403, "ここは直接消せない");
+    if !app.deletable(area, rel) {
+        return err(403, "ここは直接消せない(消せるのは、受信箱だけ)");
     }
     match fsx::remove(app.root_of(area), rel, query_param(url, "expect_rev").as_deref()) {
         Ok(()) => (200, json!({"deleted": p})),

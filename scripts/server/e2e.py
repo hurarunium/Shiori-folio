@@ -168,6 +168,28 @@ def run_all(S, P, exes, token, port):
     code, d, out = cli(exes["save"], "--journal", "--project", "shiori", write("w.md", "### 次にやること\n\n- 設計を読む\n"))
     check("日誌: 書き方の規則の警告が表示され、保存は止まらない", code == 0 and "警告: [J1]" in out and d and d["warnings"], out[:160])
 
+    # ---- 手順書・規約(memoryと同じ考え方: 読む → 直す → 読んだ版のときだけ保存 → 旧版が退避される)----
+    skill = "library/30-resources/skills/work-start.md"
+    code, d, out = cli(exes["save"], "--doc", skill, write("skill-new.md", "# v1\n手順書の初版。\n"))
+    check("手順書: 新規に作れる", code == 0 and d and d["created"] is True, out[:120])
+    work = W / "skill-edit.md"
+    code, d, out = cli(exes["save"], "--doc-get", skill, "--out", work)
+    rev = d["rev"] if d else ""
+    check("手順書: 読むと、作業用のファイルに本文が書かれ、版が表示される", code == 0 and rev and work.read_text(encoding="utf-8") == "# v1\n手順書の初版。\n", out[:120])
+    work.write_text("# v2\n手順書の2版。\n", encoding="utf-8")
+    code, d, out = cli(exes["save"], "--doc", skill, "--expect-rev", rev, work)
+    check("手順書: 読んだ版で上書きでき、旧版が退避される", code == 0 and d and d["history_file"] and not work.exists(), out[:160])
+    hist = S / d["history_file"].replace("library/", "library/", 1) if d else S
+    check("手順書: 退避の中身が旧版そのまま", hist.is_file() and hist.read_text(encoding="utf-8") == "# v1\n手順書の初版。\n")
+    stale = write("skill-stale.md", "# v3\n")
+    code, _, msg = cli(exes["save"], "--doc", skill, "--expect-rev", rev, stale)
+    check("手順書: 古い版では断られ、読み直しを案内される", code != 0 and "先に書き換えました" in msg and "--doc-get" in msg, msg[:160])
+    check("手順書: 断られても、中身は変わらない", (S / skill.replace("library/", "library/", 1)).read_text(encoding="utf-8") == "# v2\n手順書の2版。\n" and stale.exists())
+    code, _, msg = cli(exes["save"], "--doc", "library/_system/projects.yaml", "--expect-rev", "0" * 64, write("p.yaml", "x"))
+    check("手順書: 台帳(projects.yaml)には書けない", code != 0, msg[:120])
+    code, _, msg = cli(exes["save"], "--doc", "library/_system/CLAUDE.md", write("sys.md", "新規約"))
+    check("手順書: 規約は、新規には作れない(上書きだけ)", code != 0 and "新規" in msg, msg[:120])
+
     # ---- タスク ----
     code, d, _ = cli(exes["task"], "folder", "add", "詩織")
     check("タスク: フォルダを足せる", code == 0 and d and d["folders"] == ["詩織"], d)

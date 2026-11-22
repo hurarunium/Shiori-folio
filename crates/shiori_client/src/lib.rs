@@ -84,6 +84,12 @@ impl Client {
                 let body: Value = r.into_json().unwrap_or(Value::Null);
                 let detail = if code == 401 {
                     "サーバーの認証に失敗しました(トークンが違う、または失効しています。data/server.json を確認してください)".to_string()
+                } else if code == 409 && body.get("current_rev").is_some() {
+                    // 版(rev)が違う: 他の端末・セッションが先に書き換えた
+                    format!(
+                        "他の端末(またはセッション)が先に書き換えました。何も書き込んでいません。読み直して(--doc-get)、その内容に変更を反映してから、もう一度書いてください(今の版: {})",
+                        body["current_rev"].as_str().unwrap_or("?")
+                    )
                 } else {
                     body.get("detail")
                         .and_then(Value::as_str)

@@ -530,5 +530,61 @@ fn フォルダの一覧は新しい日付の順で返り件数を絞れる() {
     assert_eq!(e.call("GET", "/api/v1/list?path=library/20-projects", Some("wrong-token"), None).0, 401);
 }
 
+#[test]
+fn skillの手順書は読んだ版で上書きでき旧版が退避される() {
+    let e = Env::new();
+    let path = "library/30-resources/skills/work-start.md";
+    let (code, v) = e.win("PUT", "/api/v1/doc", Some(json!({"path": path, "content": "# v1\n"})));
+    assert_eq!((code, v["created"].clone()), (200, json!(true)), "{v}");
+    // 同じパスへの新規は断る
+    assert_eq!(e.win("PUT", "/api/v1/doc", Some(json!({"path": path, "content": "x"}))).0, 409);
+    // 読んで版を得て、その版で上書きする
+    let (_, got) = e.win("GET", &format!("/api/v1/doc?path={path}"), None);
+    let rev = got["rev"].as_str().unwrap().to_string();
+    *e.now.lock().unwrap() = at("2026-11-22T16:00:00+09:00");
+    let (code, v) = e.win("PUT", "/api/v1/doc", Some(json!({"path": path, "content": "# v2\n", "expect_rev": rev})));
+    assert_eq!(code, 200, "{v}");
+    assert_eq!(v["history_file"], "library/_system/doc-history/30-resources__skills__work-start.md@20261122T160000.md");
+    assert_eq!(std::fs::read_to_string(e.lib().join("_system/doc-history/30-resources__skills__work-start.md@20261122T160000.md")).unwrap(), "# v1\n");
+    assert_eq!(std::fs::read_to_string(e.lib().join("30-resources/skills/work-start.md")).unwrap(), "# v2\n");
+    // 古い版では、409で今の版が返り、中身は変わらない
+    let (code, v) = e.win("PUT", "/api/v1/doc", Some(json!({"path": path, "content": "# v3\n", "expect_rev": rev})));
+    assert_eq!(code, 409);
+    assert!(v["current_rev"].is_string(), "{v}");
+    assert_eq!(std::fs::read_to_string(e.lib().join("30-resources/skills/work-start.md")).unwrap(), "# v2\n");
+}
+
+#[test]
+fn 規約は上書きだけで新規には作れず台帳や退避には書けない() {
+    let e = Env::new();
+    // 新規は断る
+    let (code, v) = e.win("PUT", "/api/v1/doc", Some(json!({"path": "library/_system/CLAUDE.md", "content": "x"})));
+    assert_eq!(code, 422, "{v}");
+    // あるものは、読んだ版で上書きできる(_systemは索引の対象外なので indexed は false)
+    std::fs::write(e.lib().join("_system/CLAUDE.md"), "旧規約\n").unwrap();
+    let (_, got) = e.win("GET", "/api/v1/doc?path=library/_system/CLAUDE.md", None);
+    let (code, v) = e.win("PUT", "/api/v1/doc", Some(json!({"path": "library/_system/CLAUDE.md", "content": "新規約\n", "expect_rev": got["rev"]})));
+    assert_eq!((code, v["indexed"].clone()), (200, json!(false)), "{v}");
+    assert!(v["history_file"].as_str().unwrap().starts_with("library/_system/doc-history/_system__CLAUDE.md@"));
+    // 台帳・退避・ほかの置き場には、書けない
+    for p in ["library/_system/projects.yaml", "library/_system/tags.yaml", "library/_system/memory-history/a.md", "library/_system/doc-history/a.md", "library/20-projects/shiori/memory.md"] {
+        assert_eq!(e.win("PUT", "/api/v1/doc", Some(json!({"path": p, "content": "x"}))).0, 403, "{p}");
+    }
+    assert!(std::fs::read_to_string(e.lib().join("_system/projects.yaml")).unwrap().contains("# 台帳"), "台帳は変わらない");
+}
+
+#[test]
+fn 手順書は拡張子と秘密情報の名前を検査し消せない() {
+    let e = Env::new();
+    let put = |p: &str| e.win("PUT", "/api/v1/doc", Some(json!({"path": p, "content": "x"}))).0;
+    assert_eq!(put("library/30-resources/skills/a.exe"), 422);
+    assert_eq!(put("library/30-resources/skills/server.pem"), 422);
+    assert_eq!(put("library/30-resources/skills/cross-review.sh"), 200);
+    assert_eq!(put("library/30-resources/a.md"), 403, "skills の外の 30-resources は不可");
+    // 手順書は、消せない(受信箱だけが消せる)
+    assert_eq!(e.win("DELETE", "/api/v1/doc?path=library/30-resources/skills/cross-review.sh", None).0, 403);
+    assert!(e.lib().join("30-resources/skills/cross-review.sh").exists());
+}
+
 #[allow(dead_code)]
 fn _unused(_: &Path) {}

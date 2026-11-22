@@ -9,6 +9,8 @@
 //!         `shiori-save [--expect-updated <updated>] <memory.md>`(共通記憶MD、詩織Ver4.1)
 //!         `shiori-save <type: knowledgeの記事>`(知識の棚、詩織Ver5.0候補。保存先はlibrary/ではなくknowledge/)
 //!         `shiori-save --journal --project <名前> [--ai <名前>] [--summary "1行"] <節の本文.md>`(日誌への追記、詩織Ver7.0。サーバーにつないでいるときだけ)
+//!         `shiori-save --doc-get <path> --out <作業用のファイル>`(手順書・規約を読む。本文を書き出し、版 rev を表示する。詩織Ver7.0)
+//!         `shiori-save --doc <path> [--expect-rev <読んだrev>] <作業用のファイル>`(手順書・規約を書く。上書きは、読んだ版のときだけ。旧版は退避される)
 //!
 //! `data/server.json` があれば、内容をサーバー(shiori-server)へ送って保存する(詩織Ver7.0)。無ければ、いままでどおり手元で保存する。
 //! 対象ファイルにはfrontmatter(title/type/tags/project/author)が付与済みで
@@ -62,10 +64,20 @@ fn run() -> Result<()> {
     let mut source_arg = None;
     let mut journal = false;
     let (mut journal_project, mut journal_ai, mut journal_summary) = (None, None, None);
+    // 手順書・規約の更新(詩織Ver7.0): --doc-get <path> --out <ファイル> / --doc <path> [--expect-rev <版>] <ファイル>
+    let (mut doc_get, mut doc_put, mut doc_out, mut expect_rev) = (None, None, None, None);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--copy" {
             copy_mode = true;
+        } else if arg == "--doc-get" || arg == "--doc" || arg == "--out" || arg == "--expect-rev" {
+            let value = args.next().ok_or_else(|| anyhow!("{arg}には値が必要です"))?;
+            match arg.as_str() {
+                "--doc-get" => doc_get = Some(value),
+                "--doc" => doc_put = Some(value),
+                "--out" => doc_out = Some(value),
+                _ => expect_rev = Some(value),
+            }
         } else if arg == "--journal" {
             journal = true;
         } else if arg == "--project" || arg == "--ai" || arg == "--summary" {
@@ -86,6 +98,17 @@ fn run() -> Result<()> {
             bail!("引数が多すぎます: {arg}");
         }
     }
+    // 手順書・規約の読み出し: サーバーの本文を作業用のファイルへ書き、版(rev)を表示する
+    if let Some(path) = doc_get {
+        let client = Client::load(&project_root().join("data"), "cli").ok_or_else(|| {
+            anyhow!("手順書・規約の更新(--doc-get・--doc)は、サーバーにつないでいるとき(data/server.json があるとき)だけ使えます")
+        })?;
+        let out = doc_out.ok_or_else(|| anyhow!("--doc-getには --out <書き出す作業用のファイル> が必要です"))?;
+        return doc_get_remote(&client, &path, Path::new(&out));
+    }
+    if doc_out.is_some() || (expect_rev.is_some() && doc_put.is_none()) {
+        bail!("--outは--doc-getと、--expect-revは--docと、一緒に使います");
+    }
     let source = source_arg
         .ok_or_else(|| anyhow!("使用法: shiori-save [--copy] <mdファイル または 素材.meta のパス>"))?;
     let source = PathBuf::from(source);
@@ -99,6 +122,12 @@ fn run() -> Result<()> {
 
     // data/server.json があれば、サーバーへ送る(詩織Ver7.0)。無ければ、いままでどおり手元で保存する。
     let remote = Client::load(&project_root().join("data"), "cli");
+    if let Some(path) = doc_put {
+        let client = remote.ok_or_else(|| {
+            anyhow!("手順書・規約の更新(--doc-get・--doc)は、サーバーにつないでいるとき(data/server.json があるとき)だけ使えます")
+        })?;
+        return doc_put_remote(&client, &path, &source, expect_rev.as_deref());
+    }
     if journal {
         let client = remote.ok_or_else(|| {
             anyhow!("日誌への追記(--journal)は、サーバーにつないでいるとき(data/server.json があるとき)だけ使えます")
@@ -218,6 +247,36 @@ fn save_remote(
     show_server_notes(&result);
     let route = result.get("kind").and_then(|v| v.as_str()).unwrap_or("記事").to_string();
     print_result(&route, &result)
+}
+
+/// 手順書・規約を読む。本文を作業用のファイルに書き、版(`rev`)を表示する(上書きのとき、`--expect-rev` に渡す)。
+fn doc_get_remote(client: &Client, path: &str, out: &Path) -> Result<()> {
+    let doc = client.get(&format!("/api/v1/doc?path={}", encode_component(path)))?;
+    let content = doc.get("content").and_then(|c| c.as_str()).ok_or_else(|| anyhow!("本文を取れませんでした"))?;
+    if let Some(dir) = out.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir).with_context(|| format!("{}を作れません", dir.display()))?;
+    }
+    std::fs::write(out, content).with_context(|| format!("{}への書き込みに失敗", out.display()))?;
+    let result = serde_json::json!({ "path": path, "rev": doc.get("rev"), "out": out.display().to_string() });
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+
+/// 手順書・規約を書く。`--expect-rev` があれば、読んだ版のときだけ上書き(旧版は退避される)。無ければ新規。
+/// 書けたら、これまでどおり、作業用のファイルを消す(次に直すときは、読み直して新しい版を得る)。
+fn doc_put_remote(client: &Client, path: &str, source: &Path, expect_rev: Option<&str>) -> Result<()> {
+    let content = std::fs::read_to_string(source).with_context(|| format!("{}の読み込みに失敗", source.display()))?;
+    let mut body = serde_json::json!({ "path": path, "content": content });
+    if let Some(rev) = expect_rev {
+        body["expect_rev"] = serde_json::json!(rev);
+    }
+    let result = client.put("/api/v1/doc", &body)?;
+    std::fs::remove_file(source).with_context(|| format!("移動元{}の削除に失敗", source.display()))?;
+    let mut shown = result.clone();
+    if let Some(o) = shown.as_object_mut() {
+        o.insert("destination".into(), serde_json::json!(path));
+    }
+    print_result("手順書", &shown)
 }
 
 /// サーバーの結果にある、書き方の規則の警告と、外した項目の記録を、標準エラーに表示する(保存は済んでいる)。
