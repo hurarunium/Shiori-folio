@@ -202,6 +202,16 @@ function StartupScreen({ onFinished }: Props) {
               </button>
             </div>
           ))}
+          {/* 会話用のLLMだけが起動できないときは、会話なしで先へ進める(検索・図書館・タスクなどは、LLMを使わない) */}
+          {failedServices.every((s) => s.name === "llm") && (
+            <button
+              className="startup-screen__retry-btn"
+              onClick={() => setFailedServices([])}
+              disabled={retryingName !== null}
+            >
+              会話なしで続ける
+            </button>
+          )}
         </div>
       )}
     </div>
