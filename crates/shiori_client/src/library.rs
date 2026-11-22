@@ -57,6 +57,21 @@ pub fn system_doc(c: &Client, id: &str) -> R {
     c.get(&format!("/api/v1/system-docs/read?id={}", encode_component(id)))
 }
 
+/// ホームの申し送り(無ければ null)。`{title, project, date, source, sourceCategory, items, fromMemory, todos, notes}`。
+pub fn handoff(c: &Client) -> R {
+    c.get("/api/v1/handoff")
+}
+
+/// サーバーの状態(`storage` に、置き場の空き容量と全体の容量(GB)が入る)。
+pub fn status(c: &Client) -> R {
+    c.get("/api/v1/status")
+}
+
+/// 素材の実体(`library/…`)を、`dest` に受け取る。受け取ったバイト数を返す。
+pub fn download_file(c: &Client, path: &str, dest: &std::path::Path) -> Result<u64, ClientError> {
+    c.get_to_file(&format!("/api/v1/file?path={}", encode_component(path)), dest)
+}
+
 /// 要確認の一覧(`{tags, projects, inbox}`)。
 pub fn pending(c: &Client) -> R {
     c.get("/api/v1/pending")
@@ -115,6 +130,30 @@ mod tests {
         let c = Client::new(&url, "t", "app");
         assert_eq!(save_inbox_memo(&c, "m", "本文").unwrap(), "m-3.md");
         assert_eq!(seen.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn 素材はバイト列のままファイルに受け取り断りは理由つきの誤りになる() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", server.server_addr().to_ip().unwrap());
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let out = if req.url().contains("none") {
+                    tiny_http::Response::from_data(r#"{"detail":"見つかりません"}"#.as_bytes().to_vec()).with_status_code(404)
+                } else {
+                    tiny_http::Response::from_data(vec![0u8, 159, 255, 1]).with_status_code(200)
+                };
+                let _ = req.respond(out);
+            }
+        });
+        let c = Client::new(&url, "t", "app");
+        let d = tempfile::tempdir().unwrap();
+        let dest = d.path().join("sub/a.bin");
+        assert_eq!(download_file(&c, "library/a.bin", &dest).unwrap(), 4);
+        assert_eq!(std::fs::read(&dest).unwrap(), vec![0u8, 159, 255, 1]);
+        let e = download_file(&c, "library/none.bin", &d.path().join("b.bin")).unwrap_err();
+        assert_eq!(e.to_string(), "見つかりません");
+        assert!(!d.path().join("b.bin").exists(), "断られたら、ファイルは作らない");
     }
 
     #[test]

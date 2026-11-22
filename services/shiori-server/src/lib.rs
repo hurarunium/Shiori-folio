@@ -107,7 +107,7 @@ pub fn start_with_clock(cfg: Config, clock: Clock) -> Result<Running, String> {
                 let (device, client, out) = api::handle(&app, &mut req);
                 let code = match &out {
                     api::Out::Json((c, _)) => *c,
-                    api::Out::Zip(_) => 200,
+                    api::Out::Zip(_) | api::Out::Bytes(_) => 200,
                 };
                 app.audit.record(&device, &client, &remote, &method, &url, code, t.elapsed().as_millis() as u64);
                 use tiny_http::{Header, Response};
@@ -116,6 +116,10 @@ pub fn start_with_clock(cfg: Config, clock: Clock) -> Result<Running, String> {
                         let resp = Response::from_string(body.to_string())
                             .with_status_code(code)
                             .with_header(Header::from_bytes("Content-Type", "application/json; charset=utf-8").unwrap());
+                        let _ = req.respond(resp);
+                    }
+                    api::Out::Bytes(bytes) => {
+                        let resp = Response::from_data(bytes).with_header(Header::from_bytes("Content-Type", "application/octet-stream").unwrap());
                         let _ = req.respond(resp);
                     }
                     api::Out::Zip(bytes) => {

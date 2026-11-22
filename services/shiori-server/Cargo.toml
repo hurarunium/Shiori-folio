@@ -13,6 +13,7 @@ name = "shiori-server"
 path = "src/main.rs"
 
 [dependencies]
+fs4 = { version = "0.13", features = ["sync"] }
 chrono = "0.4"
 getrandom = "0.2"
 library_store = { path = "../../crates/library_store" }

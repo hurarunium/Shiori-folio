@@ -25,6 +25,8 @@ pub type Clock = Arc<dyn Fn() -> DateTime<FixedOffset> + Send + Sync>;
 pub enum Out {
     Json(Reply),
     Zip(Vec<u8>),
+    /// 素材の実体(そのままのバイト列)
+    Bytes(Vec<u8>),
 }
 
 pub struct App {
@@ -157,6 +159,9 @@ pub fn handle(app: &App, req: &mut Request) -> (String, String, Out) {
         };
         return (device, client, out);
     }
+    if method == Method::Get && path == "/api/v1/file" {
+        return (device, client, file_get(app, &url));
+    }
     if method == Method::Put && path == "/api/v1/upload" {
         return (device, client, Out::Json(upload(app, req, &url)));
     }
@@ -192,6 +197,8 @@ fn route(app: &App, method: &Method, path: &str, url: &str, body: &str, device: 
                 "rag": app.health.rag.load(std::sync::atomic::Ordering::Relaxed),
                 "children_managed": !app.cfg.no_children,
                 "uptime_seconds": app.started.elapsed().as_secs(),
+                // library のあるドライブの空き容量と全体の容量(GB)。アプリのホームの状態行が使う
+                "storage": storage_of(&app.roots.library),
             }),
         ),
         (Method::Get, "/api/v1/doc") => doc_get(app, url),
@@ -211,6 +218,7 @@ fn route(app: &App, method: &Method, path: &str, url: &str, body: &str, device: 
                 Err(m) => err(404, &m),
             },
         },
+        (Method::Get, "/api/v1/handoff") => (200, json!(library_store::handoff::latest(&app.roots.library, app.layout))),
         (Method::Get, "/api/v1/source") => source_get(app, url),
         (Method::Get, "/api/v1/shelf") => (200, json!(library_store::shelf_view::list(&app.roots.knowledge))),
         (Method::Get, "/api/v1/shelf/doc") => match query_param(url, "name") {
@@ -413,6 +421,35 @@ fn search(app: &App, endpoint: &str, body: &str) -> Reply {
             (200, r)
         }
         Err((code, m)) => err(code, &m),
+    }
+}
+
+/// 素材の実体を、そのまま返す(`GET /api/v1/file?path=library/…`)。アプリが、素材を開くときに受け取る。
+/// 読めるのは library の中だけ。`_system/`(規約・台帳・手順書の履歴)は、ここからは返さない。
+fn file_get(app: &App, url: &str) -> Out {
+    const MAX_FILE: u64 = 1024 * 1024 * 1024;
+    let Some(p) = query_param(url, "path") else { return Out::Json(err(400, "path が必要")) };
+    let Some((Area::Library, rel)) = split_area(&p) else { return Out::Json(err(400, "パスは library/… の形")) };
+    if rel.starts_with("_system/") {
+        return Out::Json(err(403, "ここは返せない"));
+    }
+    let Ok(abs) = fsx::resolve(&app.roots.library, rel) else { return Out::Json(err(400, "パスが正しくない")) };
+    match std::fs::metadata(&abs) {
+        Ok(m) if m.is_file() && m.len() > MAX_FILE => Out::Json(err(413, "大きすぎる")),
+        Ok(m) if m.is_file() => match std::fs::read(&abs) {
+            Ok(b) => Out::Bytes(b),
+            Err(_) => Out::Json(err(500, "読み込みに失敗")),
+        },
+        _ => Out::Json(err(404, "見つかりません")),
+    }
+}
+
+/// 置き場のドライブの空き容量と全体の容量(GB)。測れなければ null。
+fn storage_of(path: &Path) -> Value {
+    let gb = 1024.0 * 1024.0 * 1024.0;
+    match (fs4::available_space(path), fs4::total_space(path)) {
+        (Ok(free), Ok(total)) => json!({"free_gb": free as f64 / gb, "total_gb": total as f64 / gb}),
+        _ => Value::Null,
     }
 }
 

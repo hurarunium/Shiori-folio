@@ -478,6 +478,69 @@ fn 要確認の一覧と解決は窓口から行え解決の対象は監査に�
 }
 
 #[test]
+fn ホームの申し送りはmemoryの最新から返し記事の本文へつながる() {
+    let e = Env::new();
+    assert_eq!(e.win("GET", "/api/v1/handoff", None), (200, Value::Null), "何も無ければnull");
+    std::fs::create_dir_all(e.lib().join("20-projects/shiori")).unwrap();
+    std::fs::write(
+        e.lib().join("20-projects/shiori/memory.md"),
+        "---\ntitle: 詩織\nupdated: 2026-11-22T10:00:00+09:00\n---\n## やること\n\n- [ ] Phase 4 を進める\n\n## 申し送り・待ち\n\n- Macの確認待ち\n",
+    )
+    .unwrap();
+    let (code, v) = e.win("GET", "/api/v1/handoff", None);
+    assert_eq!(code, 200);
+    assert_eq!((v["project"].as_str(), v["fromMemory"].as_bool(), v["date"].as_str()), (Some("shiori"), Some(true), Some("2026-11-22")));
+    assert_eq!(v["todos"][0], "Phase 4 を進める");
+    assert_eq!(v["notes"][0], "Macの確認待ち");
+    // 画面が、この source・sourceCategory で本文を開ける
+    let url = format!(
+        "/api/v1/source?category={}&source={}",
+        v["sourceCategory"].as_str().unwrap(),
+        v["source"].as_str().unwrap().replace('/', "%2F")
+    );
+    assert_eq!(e.win("GET", &url, None).0, 200);
+}
+
+#[test]
+fn 素材の実体はlibraryの中だけそのまま返す() {
+    let e = Env::new();
+    std::fs::create_dir_all(e.lib().join("20-projects/shiori/files")).unwrap();
+    let bytes: Vec<u8> = vec![0, 159, 146, 150, 255, 1, 2, 3];
+    std::fs::write(e.lib().join("20-projects/shiori/files/a.bin"), &bytes).unwrap();
+    std::fs::write(e.root.join("secret.txt"), "秘密").unwrap();
+    let get = |path: &str, token: Option<&str>| {
+        let mut req = ureq::get(&format!("{}/api/v1/file?path={path}", e.base));
+        if let Some(t) = token {
+            req = req.set("Authorization", &format!("Bearer {t}"));
+        }
+        match req.call() {
+            Ok(r) => {
+                let mut b = Vec::new();
+                r.into_reader().read_to_end(&mut b).unwrap();
+                (200, b)
+            }
+            Err(ureq::Error::Status(c, _)) => (c, Vec::new()),
+            Err(e) => panic!("{e}"),
+        }
+    };
+    let win = e.win.clone();
+    assert_eq!(get("library/20-projects/shiori/files/a.bin", Some(&win)), (200, bytes), "バイト列のまま返る");
+    assert_eq!(get("library/20-projects/shiori/files/a.bin", None).0, 401, "認証が要る");
+    assert_eq!(get("library/_system/projects.yaml", Some(&win)).0, 403, "規約・台帳は返さない");
+    assert_eq!(get("library/..%2Fsecret.txt", Some(&win)).0, 400);
+    assert_eq!(get("knowledge/a.md", Some(&win)).0, 400, "library の外は返さない");
+    assert_eq!(get("library/20-projects/none.bin", Some(&win)).0, 404);
+}
+
+#[test]
+fn 状態に置き場の空き容量が入る() {
+    let e = Env::new();
+    let (_, v) = e.win("GET", "/api/v1/status", None);
+    let (free, total) = (v["storage"]["free_gb"].as_f64().unwrap(), v["storage"]["total_gb"].as_f64().unwrap());
+    assert!(total > 0.0 && free >= 0.0 && free <= total);
+}
+
+#[test]
 fn 規約画面の書類はv7の置き場から出し許可リスト以外は読めない() {
     let e = Env::new();
     std::fs::create_dir_all(e.lib().join("10-common")).unwrap();

@@ -121,6 +121,22 @@ impl Client {
         Self::finish(self.request("PUT", path).send_json(body))
     }
 
+    /// 応答の本文(バイト列)を、そのままファイルに書く(素材の実体。大きくてもメモリに全部は載せない)。書いたバイト数を返す。
+    pub fn get_to_file(&self, path: &str, dest: &Path) -> Result<u64, ClientError> {
+        let res = self.request("GET", path).call();
+        match res {
+            Ok(r) => {
+                if let Some(dir) = dest.parent() {
+                    std::fs::create_dir_all(dir).map_err(|e| ClientError::Connect(format!("{}を作れません: {e}", dir.display())))?;
+                }
+                let mut f = std::fs::File::create(dest).map_err(|e| ClientError::Connect(format!("{}を作れません: {e}", dest.display())))?;
+                std::io::copy(&mut r.into_reader(), &mut f).map_err(|e| ClientError::Connect(format!("受け取りに失敗: {e}")))
+            }
+            // 断りは、いつもの形(理由つき)にそろえる
+            Err(e) => Self::finish(Err(e)).map(|_| 0),
+        }
+    }
+
     /// ファイルの中身を、そのまま本文にして送る(素材の実体。大きくてもメモリに全部は載せない)。
     pub fn put_file(&self, path: &str, file: &Path) -> Result<Value, ClientError> {
         let f = std::fs::File::open(file).map_err(|e| ClientError::Connect(format!("{}を開けません: {e}", file.display())))?;
