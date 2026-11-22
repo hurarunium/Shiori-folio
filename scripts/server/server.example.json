@@ -1,0 +1,12 @@
+{
+  "bind": "(起動時に start-server.ps1 が、TailscaleのアドレスとポートでBindを上書きする。手元で試すなら 127.0.0.1:8090)",
+  "library": "C:\\ShioriServer\\library",
+  "knowledge": "C:\\ShioriServer\\knowledge",
+  "tasks": "C:\\ShioriServer\\tasks",
+  "data": "C:\\ShioriServer\\data",
+  "runtime": "C:\\ShioriServer\\runtime",
+  "embed_port": 8082,
+  "rag_port": 8083,
+  "no_children": false,
+  "layout": "v7"
+}
