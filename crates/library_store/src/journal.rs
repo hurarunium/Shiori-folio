@@ -42,6 +42,8 @@ pub struct Appended {
     pub toc_added: bool,
     /// 節の追記は済んだが、目次の更新に失敗したときの理由。
     pub toc_error: Option<String>,
+    /// 書き方の規則の警告(`rules::lint_journal_section`)。保存は止めない。
+    pub warnings: Vec<crate::rules::Warning>,
 }
 
 /// 日誌の日(午前5時より前は、前の日)。
@@ -237,6 +239,20 @@ pub fn append(
     let head = heading(now, req.device, req.ai);
     let sec = section(&head, content);
 
+    // 書き方の規則の警告。memoryとの再掲の確認のため、同じプロジェクトのmemoryの行を読む(無ければ、確認しない)
+    let memory_rel = if req.project == COMMON_PROJECT {
+        Some(layout.global_memory_rel().to_string())
+    } else {
+        layout.project_dir("project", req.project).ok().map(|d| format!("{d}/memory.md"))
+    };
+    let memory_lines: Vec<String> = memory_rel
+        .and_then(|rel| fsx::read(root, &rel).ok())
+        .and_then(|(bytes, _)| String::from_utf8(bytes).ok())
+        .and_then(|text| crate::notes::split_frontmatter(&text).ok())
+        .map(|(_, memory_body)| crate::rules::content_lines(&memory_body))
+        .unwrap_or_default();
+    let warnings = crate::rules::lint_journal_section(content, &memory_lines);
+
     if req.project != COMMON_PROJECT {
         registry::ensure_project(root, req.project)?;
     }
@@ -262,7 +278,7 @@ pub fn append(
         }
     }
 
-    Ok(Appended { rel, day, heading: head, rev, toc_added, toc_error })
+    Ok(Appended { rel, day, heading: head, rev, toc_added, toc_error, warnings })
 }
 
 #[cfg(test)]
@@ -461,6 +477,30 @@ mod tests {
         assert!(text.contains("## 09:00 win・claude-code\n\nBOMつきの本文\n"));
         // BOMだけの本文は、空として断る
         assert!(matches!(append(&l.0, Layout::V7, &req("shiori", "\u{feff}\n"), &at("2026-11-22T09:00:00+09:00")), Err(StoreError::Invalid(_))));
+    }
+
+
+    #[test]
+    fn 追記の結果に書き方の規則の警告が付き保存は止まらない() {
+        let l = Lib::new("warn");
+        let r = append(&l.0, Layout::V7, &req("shiori", "### 次にやること\n\n- 設計を読む\n"), &at("2026-11-22T09:00:00+09:00")).unwrap();
+        let ids: Vec<&str> = r.warnings.iter().map(|w| w.id).collect();
+        assert!(ids.contains(&"J1") && ids.contains(&"J2"), "{ids:?}");
+        assert!(l.read(&r.rel).contains("設計を読む"), "警告があっても、書き込まれる");
+        // 具体的な節は、警告なし
+        let ok = "### やったこと\n\n`journal.rs` で、先頭の BOM を本文に残さないようにした(PowerShell の `Set-Content` が付けるため)。試験を1件足して、112件が通った。\n";
+        assert!(append(&l.0, Layout::V7, &req("shiori", ok), &at("2026-11-22T10:00:00+09:00")).unwrap().warnings.is_empty());
+    }
+
+    #[test]
+    fn memoryの内容の再掲は警告される() {
+        let l = Lib::new("reprise");
+        let memory = "---\ntitle: m\ntype: project\nkind: memory\nproject: shiori\ntags: [a]\n---\n## やること\n\n- Phase 2: services/shiori-proto-server の窓口を本番の形にする(子のPID引き継ぎと、1分おきの自動起動を含む)。(11/22)\n";
+        std::fs::create_dir_all(l.0.join("20-projects/shiori")).unwrap();
+        std::fs::write(l.0.join("20-projects/shiori/memory.md"), memory).unwrap();
+        let body = "Phase 2: services/shiori-proto-server の窓口を本番の形にする。子のPID引き継ぎと1分おきの自動起動を含む。\n";
+        let r = append(&l.0, Layout::V7, &req("shiori", body), &at("2026-11-22T09:00:00+09:00")).unwrap();
+        assert!(r.warnings.iter().any(|w| w.id == "D4" && w.message.contains("再掲")), "{:?}", r.warnings);
     }
 
 }

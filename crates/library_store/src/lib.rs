@@ -9,6 +9,7 @@ pub mod layout;
 pub mod log;
 pub mod notes;
 pub mod registry;
+pub mod rules;
 pub mod shelf;
 pub mod tasks;
 

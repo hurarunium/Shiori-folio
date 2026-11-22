@@ -381,8 +381,16 @@ pub struct SavedMemory {
     /// 旧版を退避した先(libraryからの相対)。新規作成のときはNone。
     pub history_rel: Option<String>,
     pub newly_pending_tags: Vec<String>,
-    /// 本文が上限を超えたときの(行数, 字数)。
+    /// 本文が上限を超えたときの(行数, 字数)。**v6.2の並び(Legacy)だけ**。V7では、長さの上限を設けない。
     pub over_limit: Option<(usize, usize)>,
+    /// project名(全体用のmemoryは `_global`)。
+    pub project: String,
+    /// 書き方の規則の警告(V7だけ。`rules::lint_memory`)。保存は止めない。
+    pub warnings: Vec<crate::rules::Warning>,
+    /// 前の版にあって、新しい版で外された項目(V7だけ。書き換えられた項目は除く)。呼び出し側が、日誌へ記録する。
+    pub removed_items: Vec<String>,
+    /// 本文の大きさ(行数, 字数)。上限ではなく、情報として返す。
+    pub size: (usize, usize),
     /// 保存は済んだが、古い退避の整理に失敗したときの理由。
     pub prune_error: Option<String>,
 }
@@ -509,6 +517,17 @@ pub fn save_memory_with(
         None
     };
 
+    // 外された項目(V7)。書き込みが成功してから、前の版と比べる
+    let removed_items = match (&old, layout) {
+        (Some((old_text, _)), Layout::V7) => split_frontmatter(old_text)
+            .ok()
+            .map(|(_, old_body)| crate::rules::removed_items(&old_body, body))
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+
+    // V7: 長さの上限は設けず、書き方の規則の警告と、外した項目を返す。Legacy(v6.2)は、これまでどおり上限の警告
+    let v7 = layout == Layout::V7;
     Ok(SavedMemory {
         path: written.path,
         rel,
@@ -516,7 +535,11 @@ pub fn save_memory_with(
         updated: now.to_string(),
         history_rel,
         newly_pending_tags,
-        over_limit: memory_over_limit(body),
+        over_limit: if v7 { None } else { memory_over_limit(body) },
+        project: key,
+        warnings: if v7 { crate::rules::lint_memory(body) } else { Vec::new() },
+        removed_items,
+        size: (body.lines().count(), body.chars().count()),
         prune_error,
     })
 }
@@ -923,6 +946,39 @@ project: shiori
 tags: [詩織]");
         assert_eq!(save_article(&l.0, "c.md", f, "x
 ").unwrap().rel, "20-areas/shiori/journal/c.md");
+    }
+
+
+    // ---- V7のmemory: 長さの上限なし・規則の警告・外した項目 ----
+
+    #[test]
+    fn v7のmemoryは長くても警告せず規則の警告と外した項目を返す() {
+        let l = Lib::new("v7-memory-rules");
+        let now1 = "2026-11-22T10:00:00+09:00";
+        let now2 = "2026-11-22T11:00:00+09:00";
+        let make = |body: &str| format!("## やること\n\n{body}");
+        let first = make("- Phase 1 を進める(11/22)\n- 4-6の2回目を集計し、合否を決める(11/22)\n- 外のネットワークから、4-1・4-8を試す。(11/20)\n");
+        save_memory_with(Layout::V7, &l.0, mfm("type: project\nproject: shiori"), &first, None, now1).unwrap();
+
+        // 2回目: 「4-6…」を外し、「Phase 1…」は日付だけ書き換え、日付の無い項目を足し、非常に長い本文にする
+        let big: String = (0..400).map(|i| format!("- 項目{i}: `file{i}.rs` の状態を記録した(11/22)\n")).collect();
+        let second = make(&format!("- Phase 1 を進める(11/23)\n- 外のネットワークから、4-1・4-8を試す。(11/20)\n- 日付の無い項目 `x.rs`\n{big}"));
+        let saved = save_memory_with(Layout::V7, &l.0, mfm("type: project\nproject: shiori"), &second, Some(now1), now2).unwrap();
+        assert_eq!(saved.over_limit, None, "V7では、長さの上限を設けない");
+        assert!(saved.size.0 > 400 && saved.size.1 > 6000, "大きさは、情報として返る: {:?}", saved.size);
+        assert_eq!(saved.removed_items, vec!["- 4-6の2回目を集計し、合否を決める(11/22)".to_string()]);
+        assert_eq!(saved.project, "shiori");
+        let ids: Vec<&str> = saved.warnings.iter().map(|w| w.id).collect();
+        assert_eq!(ids, vec!["M1"], "日付の無い項目だけ: {:?}", saved.warnings);
+    }
+
+    #[test]
+    fn legacyのmemoryはこれまでどおり上限の警告だけで規則の警告は返さない() {
+        let l = Lib::new("legacy-memory-rules");
+        let body = "行\n".repeat(MEMORY_MAX_LINES + 1);
+        let saved = save_memory(&l.0, mfm("type: area\nproject: shiori"), &body, None, "2026-11-22T10:00:00+09:00").unwrap();
+        assert!(saved.over_limit.is_some());
+        assert!(saved.warnings.is_empty() && saved.removed_items.is_empty());
     }
 
 }
