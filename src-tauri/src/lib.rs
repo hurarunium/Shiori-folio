@@ -5556,7 +5556,11 @@ pub fn run() {
     // 起動時の自動修復(詩織Ver6.0の段階6)。設定とハブを読む前に、詩織が作ったものを直す
     repair::run_at_startup(&root, before);
     // AIが読むINDEX.mdを書き直す(手で直したmdを反映するため)。SSDの読み書きで起動を待たせない
+    // サーバーにつなぐときは、タスクの正本がサーバーにあるので、手元には書かない(サーバーが書き直す)
     std::thread::spawn(|| {
+        if remote::client().is_some() {
+            return;
+        }
         if let Err(e) = tasks::write_index(&tasks_root()) {
             shiori_log::warn("TASK", "INDEX.mdを書けない", &[("理由", &e)]);
         }
