@@ -9,6 +9,7 @@
 //!   shiori-task folder add <名前> / rename <元> <先> / remove <名前>
 //!   shiori-task list [--archived]
 //!
+//! `data/server.json` があれば、サーバー(shiori-server)の `/api/v1/tasks` へ送る(詩織Ver7.0)。無ければ、いままでどおり手元で動く。
 //! 結果は標準出力にJSONで返す。失敗は標準エラーに理由を出し、終了コード1で終わる。
 
 use std::collections::HashMap;
@@ -17,6 +18,7 @@ use std::path::Path;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Value};
 
+use shiori_client::{encode_component, Client};
 use shiori_folio_lib::tasks::{self, NewTask, TaskEdit};
 use shiori_folio_lib::{project_root, shiori_log, tasks_root};
 
@@ -142,12 +144,79 @@ fn run_command(root: &Path, command: &str, args: &Args) -> Result<Value> {
     Ok(result)
 }
 
+/// サーバーへ送る版。引数の読み方と、結果のJSONの形は、手元の版と同じ。
+fn run_remote(client: &Client, command: &str, args: &Args) -> Result<Value> {
+    let result = match command {
+        "add" => {
+            let summary = args.value("--summary").ok_or_else(|| anyhow!("--summaryが必要です"))?;
+            let detail = args.detail()?.unwrap_or_default();
+            let mut body = json!({ "summary": summary, "folder": args.value("--folder").unwrap_or(""), "detail": detail });
+            if let Some(due) = args.value("--due") {
+                body["due"] = json!(due);
+            }
+            client.post("/api/v1/tasks", &body)?
+        }
+        "edit" => {
+            let detail = args.detail()?;
+            let mut body = json!({});
+            if let Some(s) = args.value("--summary") {
+                body["summary"] = json!(s);
+            }
+            if let Some(d) = args.value("--due") {
+                body["due"] = json!(d);
+            }
+            if let Some(d) = detail {
+                body["detail"] = json!(d);
+            }
+            if body.as_object().is_some_and(|o| o.is_empty()) {
+                bail!("変更する項目(--summary、--due、--detail-file)を指定してください");
+            }
+            client.put(&format!("/api/v1/tasks/{}", encode_component(args.id()?)), &body)?
+        }
+        "move" => {
+            let folder = match (args.value("--folder"), args.has("--no-folder")) {
+                (Some(folder), false) => folder,
+                (None, true) => "",
+                _ => bail!("--folderか--no-folderのどちらかを指定してください"),
+            };
+            client.put(&format!("/api/v1/tasks/{}", encode_component(args.id()?)), &json!({ "folder": folder }))?
+        }
+        "done" => client.post(&format!("/api/v1/tasks/{}/done", encode_component(args.id()?)), &json!({}))?,
+        "restore" => client.post(&format!("/api/v1/tasks/{}/restore", encode_component(args.id()?)), &json!({}))?,
+        "delete" => {
+            let id = args.id()?;
+            if !args.has("--yes") {
+                bail!("削除は戻せません。ふらるに確かめてから--yesを付けてください(何もしていません)");
+            }
+            client.delete(&format!("/api/v1/tasks/{}", encode_component(id)))?
+        }
+        "folder" => {
+            let action = args.positional.get(1).map(String::as_str).unwrap_or("");
+            let name = |at: usize| -> Result<&str> {
+                args.positional.get(at).map(String::as_str).ok_or_else(|| anyhow!("フォルダの名前を指定してください"))
+            };
+            match action {
+                "add" => client.post("/api/v1/task-folders", &json!({ "folder": name(2)? }))?,
+                "rename" => client.put("/api/v1/task-folders", &json!({ "from": name(2)?, "to": name(3)? }))?,
+                "remove" => client.delete(&format!("/api/v1/task-folders?folder={}", encode_component(name(2)?)))?,
+                _ => bail!("使用法: shiori-task folder add <名前> / rename <元> <先> / remove <名前>"),
+            }
+        }
+        "list" => client.get(&format!("/api/v1/tasks{}", if args.has("--archived") { "?archived=1" } else { "" }))?,
+        _ => bail!("{USAGE}"),
+    };
+    Ok(result)
+}
+
 fn run() -> Result<()> {
     let args = Args::parse(std::env::args().skip(1))?;
     let command = args.positional.first().cloned().ok_or_else(|| anyhow!("{USAGE}"))?;
     // 概要が入るので、引数はログに書かない。
     shiori_log::debug("TASK", "始めた", &[("操作", &command)]);
-    let result = run_command(&tasks_root(), &command, &args)?;
+    let result = match Client::load(&project_root().join("data"), "cli") {
+        Some(client) => run_remote(&client, &command, &args)?,
+        None => run_command(&tasks_root(), &command, &args)?,
+    };
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
 }

@@ -8,6 +8,9 @@
 //!         `shiori-save [--copy] <素材>.meta`(素材ファイルの取り込み、詩織Ver3.5)
 //!         `shiori-save [--expect-updated <updated>] <memory.md>`(共通記憶MD、詩織Ver4.1)
 //!         `shiori-save <type: knowledgeの記事>`(知識の棚、詩織Ver5.0候補。保存先はlibrary/ではなくknowledge/)
+//!         `shiori-save --journal --project <名前> [--ai <名前>] [--summary "1行"] <節の本文.md>`(日誌への追記、詩織Ver7.0。サーバーにつないでいるときだけ)
+//!
+//! `data/server.json` があれば、内容をサーバー(shiori-server)へ送って保存する(詩織Ver7.0)。無ければ、いままでどおり手元で保存する。
 //! 対象ファイルにはfrontmatter(title/type/tags/project/author)が付与済みで
 //! あることを前提とする。実行後、対象ファイルはlibrary/配下の決定先へ
 //! 移動される(コピーではなく移動、元の場所には残らない)。frontmatterが
@@ -22,6 +25,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use std::path::{Path, PathBuf};
 
 use library_store::assets;
+use shiori_client::{encode_component, Client};
 use library_store::fsx;
 use library_store::notes::{self, split_frontmatter, Frontmatter};
 use library_store::shelf;
@@ -56,10 +60,21 @@ fn run() -> Result<()> {
     let mut copy_mode = false;
     let mut expect_updated = None;
     let mut source_arg = None;
+    let mut journal = false;
+    let (mut journal_project, mut journal_ai, mut journal_summary) = (None, None, None);
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--copy" {
             copy_mode = true;
+        } else if arg == "--journal" {
+            journal = true;
+        } else if arg == "--project" || arg == "--ai" || arg == "--summary" {
+            let value = args.next().ok_or_else(|| anyhow!("{arg}には値が必要です"))?;
+            match arg.as_str() {
+                "--project" => journal_project = Some(value),
+                "--ai" => journal_ai = Some(value),
+                _ => journal_summary = Some(value),
+            }
         } else if arg == "--expect-updated" {
             expect_updated = Some(
                 args.next()
@@ -80,6 +95,22 @@ fn run() -> Result<()> {
     let is_asset_meta = source.extension().and_then(|e| e.to_str()) == Some(assets::ASSET_META_EXT);
     if copy_mode && !is_asset_meta {
         bail!("--copyは素材の.meta取り込み専用です");
+    }
+
+    // data/server.json があれば、サーバーへ送る(詩織Ver7.0)。無ければ、いままでどおり手元で保存する。
+    let remote = Client::load(&project_root().join("data"), "cli");
+    if journal {
+        let client = remote.ok_or_else(|| {
+            anyhow!("日誌への追記(--journal)は、サーバーにつないでいるとき(data/server.json があるとき)だけ使えます")
+        })?;
+        let project = journal_project.ok_or_else(|| anyhow!("--journalには --project <名前> が必要です"))?;
+        return journal_remote(&client, &source, &project, journal_ai, journal_summary);
+    }
+    if journal_project.is_some() || journal_ai.is_some() || journal_summary.is_some() {
+        bail!("--project・--ai・--summaryは、--journal(日誌への追記)と一緒に使います");
+    }
+    if let Some(client) = remote {
+        return save_remote(&client, &source, expect_updated, copy_mode, is_asset_meta);
     }
 
     let root = library_root();
@@ -135,6 +166,83 @@ fn run() -> Result<()> {
     });
     print_result("記事", &result)?;
     Ok(())
+}
+
+// ---- サーバーへ送る(詩織Ver7.0) ----
+
+/// 内容(素材は実体も)をサーバーへ送って保存する。規則(検証・配置先・衝突の検知)はサーバーが行う。
+/// 保存できたら、これまでどおり、手元の原本を消す(`--copy` の素材は残す)。
+fn save_remote(
+    client: &Client,
+    source: &Path,
+    expect_updated: Option<String>,
+    copy_mode: bool,
+    is_asset_meta: bool,
+) -> Result<()> {
+    let content = std::fs::read_to_string(source)
+        .with_context(|| format!("{}の読み込みに失敗", source.display()))?;
+    let file_name = source
+        .file_name()
+        .ok_or_else(|| anyhow!("ファイル名の取得に失敗"))?
+        .to_string_lossy()
+        .to_string();
+    let mut body = serde_json::json!({ "file_name": file_name, "content": content });
+    if let Some(updated) = expect_updated {
+        body["expect_updated"] = serde_json::json!(updated);
+    }
+
+    // 素材は、実体を先に送る(受け取ったサーバーが、SHA-256を照合する)
+    let asset_source = is_asset_meta.then(|| source.with_extension(""));
+    if let Some(asset) = &asset_source {
+        if !asset.is_file() {
+            bail!("素材が見つかりません(.metaの隣に同名で置いてください): {}", asset.display());
+        }
+        let asset_name = asset
+            .file_name()
+            .ok_or_else(|| anyhow!("素材のファイル名の取得に失敗"))?
+            .to_string_lossy()
+            .to_string();
+        let sha = assets::sha256_of(asset)?;
+        client.put_file(&format!("/api/v1/upload?name={}&sha256={sha}", encode_component(&asset_name)), asset)?;
+        body["asset_upload"] = serde_json::json!(sha);
+    }
+
+    let result = client.post("/api/v1/save", &body)?;
+
+    if !(is_asset_meta && copy_mode) {
+        if let Some(asset) = &asset_source {
+            std::fs::remove_file(asset).with_context(|| format!("移動元{}の削除に失敗", asset.display()))?;
+        }
+        std::fs::remove_file(source).with_context(|| format!("移動元{}の削除に失敗", source.display()))?;
+    }
+    let route = result.get("kind").and_then(|v| v.as_str()).unwrap_or("記事").to_string();
+    print_result(&route, &result)
+}
+
+/// 日誌への追記。節の本文(見出しなし)をサーバーへ送る。日付・見出し・全体の日誌の目次は、サーバーが付ける。
+fn journal_remote(
+    client: &Client,
+    source: &Path,
+    project: &str,
+    ai: Option<String>,
+    summary: Option<String>,
+) -> Result<()> {
+    let content = std::fs::read_to_string(source)
+        .with_context(|| format!("{}の読み込みに失敗", source.display()))?;
+    let mut body = serde_json::json!({ "project": project, "content": content });
+    if let Some(ai) = ai {
+        body["ai"] = serde_json::json!(ai);
+    }
+    if let Some(summary) = summary {
+        body["summary"] = serde_json::json!(summary);
+    }
+    let result = client.post("/api/v1/journal/append", &body)?;
+    std::fs::remove_file(source).with_context(|| format!("移動元{}の削除に失敗", source.display()))?;
+    let mut shown = result.clone();
+    if let Some(o) = shown.as_object_mut() {
+        o.insert("destination".into(), result.get("path").cloned().unwrap_or_default());
+    }
+    print_result("日誌", &shown)
 }
 
 // 書き込み時フック(詩織Ver3.0、データ管理法見直し2-5節)。RAGサーバーが

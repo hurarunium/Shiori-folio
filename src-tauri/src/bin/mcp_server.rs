@@ -24,6 +24,7 @@ use rmcp::{
     ServiceExt,
 };
 
+use shiori_client::{encode_component, Client};
 use shiori_folio_lib::shiori_log;
 use shiori_folio_lib::{
     build_embedding_command, build_rag_command, library_root, load_search_backend_config, project_root,
@@ -84,6 +85,27 @@ fn default_shelf_limit() -> u32 {
     5
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct ReadDocumentArgs {
+    /// 読む記事のパス。検索結果の `path` をそのまま渡す(`library/…` または `knowledge/…`)
+    path: String,
+}
+
+/// data/server.json があれば、サーバーへ中継する(詩織Ver7.0)。無ければ、いままでどおり手元で動く。
+fn remote() -> Option<Client> {
+    Client::load(&project_root().join("data"), "mcp")
+}
+
+fn relay_error(e: shiori_client::ClientError) -> McpError {
+    McpError::internal_error(e.to_string(), None)
+}
+
+fn pretty(value: &serde_json::Value) -> Result<CallToolResult, McpError> {
+    let json = serde_json::to_string_pretty(value)
+        .map_err(|e| McpError::internal_error(format!("結果のJSON化に失敗: {e}"), None))?;
+    Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+}
+
 #[derive(Clone)]
 struct ShioriLibrary {
     // #[tool_router]/#[tool_handler]マクロが展開するコード内部で参照される
@@ -118,6 +140,13 @@ impl ShioriLibrary {
         description = "詩織のTier1プロファイル(_system/tier1-profile.md)を丸ごと返す。セッション開始時に検索を挟まず最初に呼ぶことを想定している"
     )]
     async fn get_context_profile(&self) -> Result<CallToolResult, McpError> {
+        if let Some(client) = remote() {
+            let doc = client
+                .get(&format!("/api/v1/doc?path={}", encode_component("library/_system/tier1-profile.md")))
+                .map_err(relay_error)?;
+            let content = doc.get("content").and_then(|c| c.as_str()).unwrap_or_default().to_string();
+            return Ok(CallToolResult::success(vec![ContentBlock::text(content)]));
+        }
         self.ensure_library_present()?;
         let path = library_root().join("_system/tier1-profile.md");
         let content = std::fs::read_to_string(&path).map_err(|e| {
@@ -133,6 +162,32 @@ impl ShioriLibrary {
         &self,
         Parameters(args): Parameters<SearchLibraryArgs>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(client) = remote() {
+            // サーバーの窓口へ中継する(結果の path は、library/… の相対パス。read_document に渡せる)
+            let mut body = serde_json::json!({ "query": args.query, "limit": args.limit, "offset": args.offset });
+            if args.author.is_some() || args.r#type.is_some() || args.project.is_some() {
+                let mut filter = serde_json::Map::new();
+                if let Some(a) = &args.author {
+                    filter.insert("author".into(), serde_json::json!(a));
+                }
+                if let Some(k) = &args.r#type {
+                    filter.insert("type".into(), serde_json::json!(k));
+                }
+                if let Some(p) = &args.project {
+                    filter.insert("project".into(), serde_json::json!(p));
+                }
+                body["filter"] = serde_json::Value::Object(filter);
+            }
+            if args.include_history {
+                body["mode"] = serde_json::json!("history");
+            }
+            let results = client.post("/api/v1/search/library", &body).map_err(|e| {
+                shiori_log::error("MCP", "検索に失敗した", &[("道具", &"search_library"), ("語", &args.query), ("理由", &e.to_string())]);
+                relay_error(e)
+            })?;
+            shiori_log::info("MCP", "検索した(サーバー経由)", &[("道具", &"search_library"), ("語", &args.query)]);
+            return pretty(&results);
+        }
         self.ensure_library_present()?;
 
         let root = project_root();
@@ -223,6 +278,18 @@ impl ShioriLibrary {
         &self,
         Parameters(args): Parameters<SearchShelfArgs>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(client) = remote() {
+            let mut body = serde_json::json!({ "query": args.query, "limit": args.limit, "offset": args.offset });
+            if let Some(topic) = &args.topic {
+                body["topic"] = serde_json::json!(topic);
+            }
+            let results = client.post("/api/v1/search/shelf", &body).map_err(|e| {
+                shiori_log::error("MCP", "検索に失敗した", &[("道具", &"search_shelf"), ("語", &args.query), ("理由", &e.to_string())]);
+                relay_error(e)
+            })?;
+            shiori_log::info("MCP", "検索した(サーバー経由)", &[("道具", &"search_shelf"), ("語", &args.query)]);
+            return pretty(&results);
+        }
         if !shelf_root().is_dir() {
             return Err(McpError::internal_error(
                 "知識の棚(knowledge/)が見つかりません。SSDが未接続か、棚がまだ作られていません",
@@ -291,6 +358,40 @@ impl ShioriLibrary {
             .map_err(|e| McpError::internal_error(format!("結果のJSON化に失敗: {e}"), None))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
+
+    #[tool(
+        description = "記事の本文を読む。search_library・search_shelfの結果の `path`(library/… または knowledge/…)をそのまま渡す。読み取り専用。サーバーにつないでいるときは、サーバーの正本を読む(SSDのパスを直接読まない)"
+    )]
+    async fn read_document(
+        &self,
+        Parameters(args): Parameters<ReadDocumentArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        if let Some(client) = remote() {
+            let doc = client
+                .get(&format!("/api/v1/doc?path={}", encode_component(&args.path)))
+                .map_err(relay_error)?;
+            let content = doc.get("content").and_then(|c| c.as_str()).unwrap_or_default().to_string();
+            return Ok(CallToolResult::success(vec![ContentBlock::text(content)]));
+        }
+        // 手元(v6.2)の動き。library/…・knowledge/… の形のパスだけを、その置き場の中で読む(.. などは断る)
+        let (root, rel) = match args.path.split_once('/') {
+            Some(("library", rel)) => (library_root(), rel),
+            Some(("knowledge", rel)) => (shelf_root(), rel),
+            _ => {
+                return Err(McpError::invalid_params(
+                    "パスは library/… または knowledge/… の形で指定してください(検索結果の path をそのまま渡す)",
+                    None,
+                ))
+            }
+        };
+        if !root.is_dir() {
+            return Err(McpError::internal_error("詩織のSSDが接続されていません", None));
+        }
+        let (bytes, _rev) = library_store::fsx::read(&root, rel).map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        let content = String::from_utf8(bytes)
+            .map_err(|_| McpError::invalid_params("UTF-8の文章ではないため、読めません", None))?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(content)]))
+    }
 }
 
 #[tool_handler]
@@ -303,7 +404,7 @@ impl ServerHandler for ShioriLibrary {
                 "詩織のライブラリ(セカンドブレイン)を検索するためのMCPサーバーです。\
                  セッション開始時にまずget_context_profileを呼び、その後は必要に応じて\
                  search_libraryで検索してください。ふらるが学んで自分の知識にしたこと(知識の棚)は\
-                 search_shelfで検索します。書き込みはこのMCPサーバー経由ではなく\
+                 search_shelfで検索します。記事の本文は、検索結果のpathをread_documentに渡して読みます。書き込みはこのMCPサーバー経由ではなく\
                  library/への直接ファイル操作(frontmatter付きmd。素材は同名の.metaを添えて\
                  shiori-saveで取り込む)で行います。保存時の\
                  配置ルールはlibrary/_system/CLAUDE.mdを参照してください。"

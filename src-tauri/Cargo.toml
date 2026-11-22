@@ -57,6 +57,8 @@ sha2 = "0.10"
 unicode-normalization = "0.1.26"
 # libraryへの書き込みを1か所に集める部品(詩織Ver7.0 Phase 1)。Tauriに依存しない
 library_store = { path = "../crates/library_store" }
+# サーバーに話しかける側(shiori-save・shiori-task・mcp_serverが、server.jsonがあるときに使う)
+shiori_client = { path = "../crates/shiori_client" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

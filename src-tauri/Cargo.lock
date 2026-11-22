@@ -2344,9 +2344,11 @@ dependencies = [
 name = "library_store"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "serde",
  "serde_yaml",
  "sha2",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -3836,6 +3838,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
+ "shiori_client",
  "sysinfo",
  "tauri",
  "tauri-build",
@@ -3846,6 +3849,15 @@ dependencies = [
  "unicode-normalization",
  "ureq",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "shiori_client"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "ureq",
 ]
 
 [[package]]
