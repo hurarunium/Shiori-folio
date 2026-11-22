@@ -9,6 +9,7 @@ pub mod journal;
 pub mod layout;
 pub mod log;
 pub mod notes;
+pub mod preview;
 pub mod registry;
 pub mod rules;
 pub mod shelf;

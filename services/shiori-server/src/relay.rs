@@ -56,6 +56,42 @@ pub fn search(rag_port: u16, endpoint: &str, request: &Value, bases: &[(&Path, &
     }
 }
 
+/// 蔵書の一覧(RAGの `/list_all_library`)を中継する。`path`・`asset_path` は相対パスにする。
+pub fn list_library(rag_port: u16, bases: &[(&Path, &str)]) -> Result<Value, (u16, String)> {
+    let url = format!("http://127.0.0.1:{rag_port}/list_all_library");
+    match ureq::get(&url).timeout(Duration::from_secs(60)).call() {
+        Ok(r) => match r.into_json::<Value>() {
+            Ok(mut v) => {
+                rewrite(&mut v, bases);
+                Ok(v)
+            }
+            Err(e) => Err((502, format!("蔵書一覧の応答を読めない: {e}"))),
+        },
+        Err(ureq::Error::Status(c, _)) => Err((502, format!("蔵書一覧が{c}を返した"))),
+        Err(e) => Err((503, format!("検索につながらない: {e}"))),
+    }
+}
+
+/// 一覧・検索結果の各項目に、記事の属性と冒頭の文(`preview`)を添える。
+/// `path`(`library/…`・`knowledge/…`)の記事を読み、読めない・.md/.meta でないものは、添えない。
+pub fn add_previews(value: &mut Value, bases: &[(&Path, &str)]) {
+    let Value::Array(items) = value else { return };
+    for item in items {
+        let Some(p) = item.get("path").and_then(Value::as_str) else { continue };
+        if !(p.ends_with(".md") || p.ends_with(".meta")) {
+            continue;
+        }
+        let Some((base, rel)) = bases.iter().find_map(|(b, prefix)| p.strip_prefix(&format!("{prefix}/")).map(|r| (*b, r))) else {
+            continue;
+        };
+        let Ok((bytes, _)) = library_store::fsx::read(base, rel) else { continue };
+        let Ok(text) = String::from_utf8(bytes) else { continue };
+        if let (Some(o), Ok(pv)) = (item.as_object_mut(), serde_json::to_value(library_store::preview::preview_of(&text))) {
+            o.insert("preview".into(), pv);
+        }
+    }
+}
+
 /// 保存のあとの索引の更新。RAGが動いていなければ、何もしない(次回の起動時の全件スキャンが拾う)。戻り値は、更新できたか。
 pub fn reindex(rag_port: u16, endpoint: &str, path: &str) -> bool {
     let health = format!("http://127.0.0.1:{rag_port}/health");

@@ -337,6 +337,11 @@ fn fake_rag(lib: PathBuf, shelf: PathBuf) -> (u16, Arc<Mutex<Vec<String>>>) {
                 "/health" => json!({"status": "ok"}),
                 "/search_library" => json!([{"path": lib.join("20-projects/shiori/memory.md").to_string_lossy(), "asset_path": "", "text": "本文"}]),
                 "/search_shelf" => json!([{"path": shelf.join("math.md").to_string_lossy(), "text": "棚"}]),
+                "/list_all_library" => json!([
+                    {"source": "memory.md", "path": lib.join("20-projects/shiori/memory.md").to_string_lossy(), "asset_path": "", "title": "詩織"},
+                    {"source": "gone.md", "path": lib.join("20-projects/shiori/gone.md").to_string_lossy(), "asset_path": "", "title": "消えた"},
+                    {"source": "x.md", "path": "D:/outside/x.md", "asset_path": "", "title": "外"}
+                ]),
                 _ => {
                     log.lock().unwrap().push(format!("{url} {body}"));
                     json!({})
@@ -365,6 +370,42 @@ fn 検索の中継は絶対パスを相対パスに直す() {
     let (_, v) = e.win("POST", "/api/v1/search/shelf", Some(json!({"query": "数学"})));
     assert_eq!(v[0]["path"], "knowledge/math.md");
     assert_eq!(e.win("POST", "/api/v1/search/library", Some(json!({"x": 1}))).0, 422);
+}
+
+#[test]
+fn 蔵書の一覧と検索結果に属性と冒頭の文が添えられる() {
+    let dir = tempfile::tempdir().unwrap();
+    let lib = dir.path().join("library");
+    std::fs::create_dir_all(lib.join("20-projects/shiori")).unwrap();
+    std::fs::write(
+        lib.join("20-projects/shiori/memory.md"),
+        "---\ntitle: 詩織\nproject: shiori\nkind: memory\nsummary: 詩織の今の状態\n---\n本文",
+    )
+    .unwrap();
+    let (port, _) = fake_rag(lib.clone(), dir.path().join("knowledge"));
+    let e = Env::with(|c| {
+        c.library = lib.clone();
+        c.knowledge = dir.path().join("knowledge");
+        c.tasks = dir.path().join("tasks");
+        c.data = dir.path().join("data");
+        c.rag_port = port;
+    });
+    let (code, v) = e.win("GET", "/api/v1/library-index", None);
+    assert_eq!(code, 200);
+    assert_eq!(v[0]["path"], "library/20-projects/shiori/memory.md");
+    assert_eq!(v[0]["preview"]["summary"], "詩織の今の状態");
+    assert_eq!(v[0]["preview"]["project"], "shiori");
+    assert_eq!(v[0]["preview"]["entry_kind"], "memory");
+    assert!(v[1].get("preview").is_none(), "読めない記事には添えない(一覧は止めない)");
+    assert_eq!(v[2]["path"], "", "置き場の外の絶対パスは外へ出さない");
+    // 検索結果にも添える
+    let (_, v) = e.win("POST", "/api/v1/search/library", Some(json!({"query": "詩織"})));
+    assert_eq!(v[0]["preview"]["summary"], "詩織の今の状態");
+}
+
+#[test]
+fn 蔵書の一覧はragが無ければ503で返る() {
+    assert_eq!(Env::new().win("GET", "/api/v1/library-index", None).0, 503);
 }
 
 #[test]

@@ -196,6 +196,7 @@ fn route(app: &App, method: &Method, path: &str, url: &str, body: &str, device: 
         ),
         (Method::Get, "/api/v1/doc") => doc_get(app, url),
         (Method::Get, "/api/v1/list") => doc_list(app, url),
+        (Method::Get, "/api/v1/library-index") => library_index(app),
         (Method::Put, "/api/v1/doc") => doc_put(app, body),
         (Method::Delete, "/api/v1/doc") => doc_delete(app, url),
         (Method::Post, "/api/v1/save") => save(app, body, device),
@@ -381,7 +382,25 @@ fn search(app: &App, endpoint: &str, body: &str) -> Reply {
     };
     let bases: [(&Path, &str); 2] = [(&app.roots.library, "library"), (&app.roots.knowledge, "knowledge")];
     match relay::search(app.cfg.rag_port, endpoint, &v, &bases) {
-        Ok(r) => (200, r),
+        Ok(mut r) => {
+            // 図書館の検索結果には、一覧に出す属性と冒頭の文を添える
+            if endpoint == "search_library" {
+                relay::add_previews(&mut r, &bases);
+            }
+            (200, r)
+        }
+        Err((code, m)) => err(code, &m),
+    }
+}
+
+/// 蔵書の一覧(`GET /api/v1/library-index`)。アプリの図書館の画面用。各項目に `preview` を添える。
+fn library_index(app: &App) -> Reply {
+    let bases: [(&Path, &str); 2] = [(&app.roots.library, "library"), (&app.roots.knowledge, "knowledge")];
+    match relay::list_library(app.cfg.rag_port, &bases) {
+        Ok(mut r) => {
+            relay::add_previews(&mut r, &bases);
+            (200, r)
+        }
         Err((code, m)) => err(code, &m),
     }
 }
