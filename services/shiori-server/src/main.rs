@@ -66,6 +66,8 @@ fn run(args: &[String]) -> Result<(), String> {
                 cfg.no_children = true;
             }
             let running = shiori_server::start(cfg)?;
+            // 動いている間は、PCを眠らせない(モダン スタンバイでTailscaleが落ちるのを防ぐ)
+            eprintln!("{}", shiori_server::keep_awake::start("詩織サーバーが動いている間は、眠らない"));
             // 毎日05:00の世代(止まっていた分は、起動時に追いつく)
             backup::spawn_schedule(
                 running.app.roots.clone(),

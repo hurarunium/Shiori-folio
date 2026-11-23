@@ -7,6 +7,7 @@ pub mod auth;
 pub mod backup;
 pub mod children;
 pub mod config;
+pub mod keep_awake;
 pub mod relay;
 pub mod saver;
 pub mod tasks_api;
