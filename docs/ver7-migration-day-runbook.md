@@ -137,9 +137,11 @@ robocopy E:\portable\tasks C:\shiori-migrate\tasks /E /XF "._*" ".DS_Store" /NFL
    C:\ShioriServer\bin\shiori-server.exe token revoke win --data C:\ShioriServer\data
    C:\ShioriServer\bin\shiori-server.exe token revoke win2 --data C:\ShioriServer\data
    C:\ShioriServer\bin\shiori-server.exe token revoke mac --data C:\ShioriServer\data
-   C:\ShioriServer\bin\shiori-server.exe token add win --data C:\ShioriServer\data
-   C:\ShioriServer\bin\shiori-server.exe token add mac --data C:\ShioriServer\data
+   C:\ShioriServer\bin\shiori-server.exe token add win7 --data C:\ShioriServer\data
+   C:\ShioriServer\bin\shiori-server.exe token add mac7 --data C:\ShioriServer\data
    ```
+
+   **失効(`revoke`)は、印を付けるだけで、名前は残る。同じ名前で `token add` すると「すでにある」で失敗する。**新しい名前(ここでは `win7`・`mac7`)で作る。端末の名前は、日誌の見出し(`## HH:MM 端末・AI`)にも出る。
 
    表示されたトークンは、**チャットに貼らず**、それぞれの `server.json` に、自分で置く。
 5. 自動起動を戻し、起動する。
