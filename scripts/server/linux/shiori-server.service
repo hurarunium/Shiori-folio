@@ -1,0 +1,24 @@
+# Ver7.0 サーバー(Linux): systemdのユニット。/etc/systemd/system/shiori-server.service に置く。
+# 起動時に自動で始まり、落ちたら10秒後に起こし直す。Tailscaleのアドレスがまだ無い起動直後は、
+# start-server.sh が失敗して終わり、10秒後の再試行で通る。
+[Unit]
+Description=Shiori Server (Ver7.0)
+After=network-online.target tailscaled.service
+Wants=network-online.target tailscaled.service
+
+[Service]
+Type=simple
+User=shiori
+Group=shiori
+WorkingDirectory=/opt/shiori-server
+Environment=ROOT=/opt/shiori-server
+# 埋め込みの llama-server の共有ライブラリの置き場(子のプロセスが引き継ぐ。children.rs はWindows向けにPATHだけを足すため)
+Environment=LD_LIBRARY_PATH=/opt/shiori-server/runtime/bin/linux/libs-llama:/opt/shiori-server/runtime/bin/linux
+ExecStart=/opt/shiori-server/scripts/start-server.sh
+Restart=always
+RestartSec=10
+# 窓口を止めても、子(llama-server・shiori-rag)は残す設計(次の起動でそのまま使う)。systemdが子も止めないようにする
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

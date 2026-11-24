@@ -1,0 +1,12 @@
+{
+  "bind": "(起動時に start-server.sh が、TailscaleのアドレスとポートでBindを上書きする。手元で試すなら 127.0.0.1:8090)",
+  "library": "/opt/shiori-server/library",
+  "knowledge": "/opt/shiori-server/knowledge",
+  "tasks": "/opt/shiori-server/tasks",
+  "data": "/opt/shiori-server/data",
+  "runtime": "/opt/shiori-server/runtime",
+  "embed_port": 8082,
+  "rag_port": 8083,
+  "no_children": false,
+  "layout": "v7"
+}
