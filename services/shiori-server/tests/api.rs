@@ -787,5 +787,110 @@ fn 手順書は拡張子と秘密情報の名前を検査し消せない() {
     assert!(e.lib().join("30-resources/skills/cross-review.sh").exists());
 }
 
+// ---- 利用統計(Ver7.0.1) ----
+
+fn tokens(output: u64) -> claude_stats::Tokens {
+    claude_stats::Tokens { input: 1, cache_creation: 10, cache_read: 100, output }
+}
+
+/// 応答1つ(id・日時・出力トークン数)と発言1つを持つ差分。
+fn delta_of(response: &str, at_secs: i64, output: u64, message: &str) -> Value {
+    let d = claude_stats::Delta {
+        version: claude_stats::DELTA_VERSION,
+        responses: vec![claude_stats::DeltaResponse(
+            response.into(), at_secs, "claude-opus-5-5".into(), "s1".into(), tokens(output), tokens(output),
+        )],
+        messages: vec![claude_stats::DeltaMessage(message.into(), at_secs, "s1".into(), 1)],
+    };
+    serde_json::to_value(d).unwrap()
+}
+
+#[test]
+fn 統計の窓口は認証が要る() {
+    let e = Env::new();
+    let d = delta_of("r1", at("2026-11-22T10:00:00+09:00").timestamp(), 5, "m1");
+    assert_eq!(e.call("PUT", "/api/v1/stats/claude/pc1", None, Some(d)).0, 401);
+    assert_eq!(e.call("GET", "/api/v1/stats/claude", None, None).0, 401);
+}
+
+#[test]
+fn 端末ごとの差分を送ると全端末の合算が返り_同じ差分の再送で増えない() {
+    let e = Env::new();
+    let t = at("2026-11-22T10:00:00+09:00").timestamp();
+    let (code, v) = e.win("PUT", "/api/v1/stats/claude/pc1", Some(delta_of("r1", t, 5, "m1")));
+    assert_eq!((code, v["responses"].as_u64(), v["messages"].as_u64()), (200, Some(1), Some(1)), "{v}");
+    // 2台目(mac)。r1は1台目と同じ会話の写し、r2は自分だけの応答。
+    let mut d2 = delta_of("r2", t, 7, "m2");
+    let same = delta_of("r1", t, 5, "m1");
+    d2["responses"].as_array_mut().unwrap().extend(same["responses"].as_array().unwrap().clone());
+    d2["messages"].as_array_mut().unwrap().extend(same["messages"].as_array().unwrap().clone());
+    assert_eq!(e.call("PUT", "/api/v1/stats/claude/pc2", Some(&e.mac.clone()), Some(d2)).0, 200);
+
+    let (code, s) = e.win("GET", "/api/v1/stats/claude?range=all&tz=540", None);
+    assert_eq!(code, 200, "{s}");
+    assert_eq!(s["hosts"].as_array().unwrap().len(), 2);
+    assert_eq!(s["messages"], 2, "端末をまたぐ重複は1回だけ");
+    assert_eq!(s["actual"]["output"], 12);
+    assert_eq!(s["until"], "2026-11-22");
+
+    // 同じ差分をもう一度送っても、集計は変わらない。
+    assert_eq!(e.win("PUT", "/api/v1/stats/claude/pc1", Some(delta_of("r1", t, 5, "m1"))).0, 200);
+    let (_, again) = e.win("GET", "/api/v1/stats/claude?range=all&tz=540", None);
+    assert_eq!((again["messages"].clone(), again["actual"].clone()), (s["messages"].clone(), s["actual"].clone()));
+
+    // 端末で絞り込める。
+    let (_, only) = e.win("GET", "/api/v1/stats/claude?range=all&tz=540&host=pc2", None);
+    assert_eq!((only["messages"].as_u64(), only["actual"]["output"].as_u64()), (Some(2), Some(12)));
+    let (_, one) = e.win("GET", "/api/v1/stats/claude?range=all&tz=540&host=pc1", None);
+    assert_eq!((one["messages"].as_u64(), one["actual"]["output"].as_u64()), (Some(1), Some(5)));
+}
+
+#[test]
+fn 日付の区切りは要求の時差で決まり_台帳はサーバーのdataに置かれる() {
+    let e = Env::new();
+    // 日本時間 11/22 00:30 = UTC 11/21 15:30
+    let t = at("2026-11-22T00:30:00+09:00").timestamp();
+    assert_eq!(e.win("PUT", "/api/v1/stats/claude/pc1", Some(delta_of("r1", t, 5, "m1"))).0, 200);
+    let (_, jp) = e.win("GET", "/api/v1/stats/claude?range=all&tz=540", None);
+    let (_, utc) = e.win("GET", "/api/v1/stats/claude?range=all&tz=0", None);
+    assert_eq!(jp["daily"][0]["date"], "2026-11-22");
+    assert_eq!(utc["daily"][0]["date"], "2026-11-21");
+    assert!(e.root.join("data/claude-stats/pc1.json").exists());
+    // 古い日は、期間で絞られる(サーバーの時計は 2026-11-22)。
+    let old = at("2026-09-01T10:00:00+09:00").timestamp();
+    assert_eq!(e.win("PUT", "/api/v1/stats/claude/pc1", Some(delta_of("r0", old, 3, "m0"))).0, 200);
+    let (_, d7) = e.win("GET", "/api/v1/stats/claude?range=days7&tz=540", None);
+    let (_, all) = e.win("GET", "/api/v1/stats/claude?range=all&tz=540", None);
+    assert_eq!((d7["messages"].as_u64(), all["messages"].as_u64()), (Some(1), Some(2)));
+}
+
+#[test]
+fn 統計の不正な入力は断り_台帳を壊さない() {
+    let e = Env::new();
+    let t = at("2026-11-22T10:00:00+09:00").timestamp();
+    // 名前が空
+    assert_eq!(e.win("PUT", "/api/v1/stats/claude/", Some(delta_of("r1", t, 5, "m1"))).0, 422);
+    // 制御文字(%0A)
+    assert_eq!(e.win("PUT", "/api/v1/stats/claude/a%0Ab", Some(delta_of("r1", t, 5, "m1"))).0, 422);
+    // 本文の形が違う
+    assert_eq!(e.win("PUT", "/api/v1/stats/claude/pc1", Some(json!({"hello": 1}))).0, 422);
+    // 版が違う
+    let mut old = delta_of("r1", t, 5, "m1");
+    old["version"] = json!(99);
+    let (code, v) = e.win("PUT", "/api/v1/stats/claude/pc1", Some(old));
+    assert_eq!(code, 422, "{v}");
+    assert!(!e.root.join("data/claude-stats/pc1.json").exists(), "断ったときは台帳を作らない");
+    // 集計の引数
+    assert_eq!(e.win("GET", "/api/v1/stats/claude?range=year", None).0, 422);
+    assert_eq!(e.win("GET", "/api/v1/stats/claude?tz=abc", None).0, 422);
+    assert_eq!(e.win("GET", "/api/v1/stats/claude?tz=99999999", None).0, 422);
+    // 窓口に無い
+    assert_eq!(e.win("GET", "/api/v1/stats/codex", None).0, 404);
+    assert_eq!(e.win("DELETE", "/api/v1/stats/claude/pc1", None).0, 404);
+    // 記録が1件も無くても、集計は空で返る
+    let (code, s) = e.win("GET", "/api/v1/stats/claude", None);
+    assert_eq!((code, s["messages"].as_u64(), s["hosts"].as_array().map(Vec::len)), (200, Some(0), Some(0)));
+}
+
 #[allow(dead_code)]
 fn _unused(_: &Path) {}

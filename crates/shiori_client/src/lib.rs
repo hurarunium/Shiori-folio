@@ -6,6 +6,7 @@
 //! サーバーにつながらないとき、手元の動きへ黙って切り替えない(正本が2つになるのを防ぐ)。
 
 pub mod library;
+pub mod stats;
 pub mod tasks;
 
 use serde_json::Value;

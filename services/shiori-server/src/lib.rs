@@ -10,6 +10,7 @@ pub mod config;
 pub mod keep_awake;
 pub mod relay;
 pub mod saver;
+pub mod stats_api;
 pub mod tasks_api;
 
 use std::net::SocketAddr;

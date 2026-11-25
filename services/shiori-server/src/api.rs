@@ -14,7 +14,7 @@ use tiny_http::{Method, Request};
 use crate::audit::Audit;
 use crate::config::Config;
 use crate::saver::{self, Reindex, Roots, SaveReq};
-use crate::{auth, backup, children, relay, tasks_api};
+use crate::{auth, backup, children, relay, stats_api, tasks_api};
 
 pub const MAX_BODY: u64 = 4 * 1024 * 1024;
 pub const MAX_UPLOAD: u64 = 512 * 1024 * 1024;
@@ -69,7 +69,7 @@ fn header_value(req: &Request, name: &'static str) -> Option<String> {
     req.headers().iter().find(|h| h.field.equiv(name)).map(|h| h.value.to_string())
 }
 
-fn percent_decode(s: &str) -> Option<String> {
+pub fn percent_decode(s: &str) -> Option<String> {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -186,6 +186,9 @@ fn parse<T: for<'de> Deserialize<'de>>(body: &str) -> Result<T, Reply> {
 fn route(app: &App, method: &Method, path: &str, url: &str, body: &str, device: &str) -> Reply {
     if path.starts_with("/api/v1/tasks") || path.starts_with("/api/v1/task-folders") {
         return tasks_api::route(app, method, path, url, body);
+    }
+    if path.starts_with("/api/v1/stats/") {
+        return stats_api::route(app, method, path, url, body);
     }
     match (method, path) {
         (Method::Get, "/api/v1/status") => (
