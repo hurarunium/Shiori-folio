@@ -523,6 +523,25 @@ pub fn apply_delta(ledger_dir: &Path, host: &str, delta: &Delta, now_ms: u64) ->
     })
 }
 
+/// 端末側。まだ送っていない記録を、`max_records`件ずつ`send`で送りきる(1回ごとに、送れた分を送る対象から外す)。
+/// `send`が失敗したら、そこで止めてエラーを返す。送れていない記録は、送る対象に残る(次回に送り直す)。
+/// 返すのは、送れた記録の数。
+pub fn push_pending<F>(ledger_dir: &Path, host: &str, max_records: usize, mut send: F) -> Result<usize, String>
+where
+    F: FnMut(&Delta) -> Result<(), String>,
+{
+    let mut sent = 0;
+    loop {
+        let delta = take_delta(ledger_dir, host, max_records)?;
+        if delta.is_empty() {
+            return Ok(sent);
+        }
+        send(&delta)?;
+        mark_sent(ledger_dir, host, &delta)?;
+        sent += delta.len();
+    }
+}
+
 /// 集計する期間。
 #[derive(Deserialize, Clone, Copy, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -530,6 +549,17 @@ pub enum StatsRange {
     All,
     Days30,
     Days7,
+}
+
+impl StatsRange {
+    /// サーバーの窓口(`?range=`)に渡す名前。
+    pub fn as_query(&self) -> &'static str {
+        match self {
+            StatsRange::All => "all",
+            StatsRange::Days30 => "days30",
+            StatsRange::Days7 => "days7",
+        }
+    }
 }
 
 #[derive(Serialize, Debug)]
@@ -1194,5 +1224,40 @@ mod tests {
         let old = Delta { version: DELTA_VERSION + 1, ..Delta::default() };
         assert!(apply_delta(&root.join("other"), "pc1", &old, NOW_MS).unwrap_err().contains("版"));
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn push_pendingは送りきり_失敗したら残りを送る対象に残す() {
+        let root = temp_dir("sync-push");
+        let (projects, client, server) = (root.join("projects"), root.join("client"), root.join("server"));
+        append(&projects.join("p/s1.jsonl"), &history());
+        refresh_with(&projects, &client, "pc1", NOW_MS, true).unwrap();
+        // 2件ずつ送り、2回目で失敗する。
+        let mut calls = 0;
+        let r = push_pending(&client, "pc1", 2, |d| {
+            calls += 1;
+            if calls == 2 {
+                return Err("つながらない".into());
+            }
+            apply_delta(&server, "pc1", d, NOW_MS).map(|_| ())
+        });
+        assert_eq!(r.unwrap_err(), "つながらない");
+        assert_eq!(take_delta(&client, "pc1", 100).unwrap().len(), 4, "6件のうち、送れた2件だけが外れる");
+        // 直ったあと、残りだけを送りきる。
+        let n = push_pending(&client, "pc1", 2, |d| apply_delta(&server, "pc1", d, NOW_MS).map(|_| ())).unwrap();
+        assert_eq!(n, 4);
+        assert!(take_delta(&client, "pc1", 100).unwrap().is_empty());
+        assert_eq!(summary(&server, StatsRange::All, None).messages, 4);
+        // 送るものが無ければ、sendを呼ばない。
+        assert_eq!(push_pending(&client, "pc1", 2, |_| Err("呼ばれない".into())).unwrap(), 0);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn 期間の名前は窓口の名前と合う() {
+        assert_eq!(
+            [StatsRange::All, StatsRange::Days30, StatsRange::Days7].map(|r| r.as_query()),
+            ["all", "days30", "days7"]
+        );
     }
 }

@@ -769,10 +769,20 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
+ "shiori_client",
  "tempfile",
  "tiny_http",
  "ureq",
  "zip",
+]
+
+[[package]]
+name = "shiori_client"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "ureq",
 ]
 
 [[package]]

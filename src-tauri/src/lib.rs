@@ -1744,7 +1744,22 @@ fn refresh_claude_stats_blocking(force: bool) -> Result<Option<claude_stats::Ref
     let projects = claude_stats::default_projects_dir()
         .ok_or("Claude Codeの履歴の場所(ホームフォルダ)が分かりません")?;
     let host = stats_host_name();
-    let outcome = claude_stats::refresh(&projects, &claude_stats_dir(), &host, now_ms)?;
+    // サーバーにつないでいるときは、サーバーへ送る準備(初めてなら、過去の台帳の全記録を送る対象にする)もする。
+    let remote = remote::client();
+    let outcome = claude_stats::refresh_with(&projects, &claude_stats_dir(), &host, now_ms, remote.is_some())?;
+    if let Some(c) = &remote {
+        // 送れなければエラーにする(手元の集計へ黙って切り替えない)。送れていない記録は、
+        // 台帳に「送る対象」として残り、`last`も更新しないので、次に開いたときに送り直す。
+        let sent = claude_stats::push_pending(&claude_stats_dir(), &host, claude_stats::MAX_DELTA_RECORDS, |delta| {
+            let body = serde_json::to_value(delta).map_err(|e| format!("差分を作れません: {e}"))?;
+            shiori_client::stats::claude_push(c, &host, &body)
+                .map(|_| ())
+                .map_err(shiori_client::stats::explain)
+        })?;
+        if sent > 0 {
+            shiori_log::info("APP", "Claudeの利用統計をサーバーへ送った", &[("件数", &sent)]);
+        }
+    }
     *last = Some(now_ms);
     Ok(Some(outcome))
 }
@@ -1760,13 +1775,20 @@ async fn refresh_claude_stats(force: bool) -> Result<Option<claude_stats::Refres
 async fn get_claude_stats(
     range: claude_stats::StatsRange,
     host: Option<String>,
-) -> Result<claude_stats::ClaudeStats, String> {
+) -> Result<serde_json::Value, String> {
     let now_ms = unix_now_ms()?;
-    tauri::async_runtime::spawn_blocking(move || {
-        claude_stats::summarize_local(&claude_stats_dir(), range, host.as_deref(), now_ms)
+    tauri::async_runtime::spawn_blocking(move || match remote::client() {
+        // サーバーにつないでいるときは、サーバーが全端末を合算した結果を返す。日付の区切りは、このPCの時差で。
+        Some(c) => {
+            let tz_minutes = chrono::Local::now().offset().local_minus_utc() / 60;
+            shiori_client::stats::claude_summary(&c, range.as_query(), host.as_deref(), tz_minutes)
+                .map_err(shiori_client::stats::explain)
+        }
+        None => serde_json::to_value(claude_stats::summarize_local(&claude_stats_dir(), range, host.as_deref(), now_ms))
+            .map_err(|e| format!("利用統計の集計に失敗: {e}")),
     })
     .await
-    .map_err(|e| format!("利用統計の集計に失敗: {e}"))
+    .map_err(|e| format!("利用統計の集計に失敗: {e}"))?
 }
 
 #[tauri::command]

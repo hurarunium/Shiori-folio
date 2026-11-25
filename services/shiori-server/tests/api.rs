@@ -892,5 +892,70 @@ fn 統計の不正な入力は断り_台帳を壊さない() {
     assert_eq!((code, s["messages"].as_u64(), s["hosts"].as_array().map(Vec::len)), (200, Some(0), Some(0)));
 }
 
+/// アプリがやることを、そのまま通す: 履歴を取り込み、送る準備をし、サーバーへ送り、サーバーの合算を取る。
+/// (本物の `shiori_client` で、本物のサーバーに、HTTPで)
+#[test]
+fn 端末の取り込みから送信と合算までの一巡_過去の台帳の引き継ぎを含む() {
+    let e = Env::new();
+    let dir = tempfile::tempdir().unwrap();
+    let (projects, client_dir) = (dir.path().join("projects"), dir.path().join("client"));
+    std::fs::create_dir_all(projects.join("p")).unwrap();
+    let line = |kind: &str, uuid: &str, id: &str, out: u64| {
+        let msg = if kind == "assistant" {
+            format!(r#","message":{{"id":"{id}","model":"claude-opus-5-5","usage":{{"input_tokens":1,"cache_creation_input_tokens":10,"cache_read_input_tokens":100,"output_tokens":{out}}}}}"#)
+        } else {
+            String::new()
+        };
+        format!(r#"{{"type":"{kind}","uuid":"{uuid}","sessionId":"s1","timestamp":"2026-11-22T01:00:00Z","isSidechain":false{msg}}}"#)
+    };
+    let history = projects.join("p/s1.jsonl");
+    std::fs::write(&history, format!("{}\n{}\n", line("user", "u1", "", 0), line("assistant", "a1", "m1", 5))).unwrap();
+
+    // Ver7.0までの台帳: サーバー接続の前に、手元だけで取り込んだもの。
+    let now_ms = at("2026-11-22T14:30:00+09:00").timestamp_millis() as u64;
+    claude_stats::refresh(&projects, &client_dir, "mac1", now_ms).unwrap();
+
+    // 以後は、アプリと同じ流れ。
+    let c = shiori_client::Client::new(&e.base, &e.mac, "app");
+    let run = |c: &shiori_client::Client| -> usize {
+        claude_stats::refresh_with(&projects, &client_dir, "mac1", now_ms, true).unwrap();
+        claude_stats::push_pending(&client_dir, "mac1", 2, |d| {
+            let body = serde_json::to_value(d).unwrap();
+            shiori_client::stats::claude_push(c, "mac1", &body).map(|_| ()).map_err(shiori_client::stats::explain)
+        })
+        .unwrap()
+    };
+    assert_eq!(run(&c), 3, "過去の台帳の3件(発言2・応答1)が、2件ずつに分けて送られる");
+    assert_eq!(run(&c), 0, "続けて動かしても、送り直さない");
+
+    // 履歴が増えると、増えた分だけが送られる。
+    let mut f = std::fs::OpenOptions::new().append(true).open(&history).unwrap();
+    use std::io::Write;
+    writeln!(f, "{}", line("user", "u2", "", 0)).unwrap();
+    assert_eq!(run(&c), 1);
+
+    // サーバーの合算が、端末の台帳の集計と同じ。
+    let s = shiori_client::stats::claude_summary(&c, "all", None, 540).unwrap();
+    let local = claude_stats::summarize(&client_dir, claude_stats::StatsRange::All, None, now_ms, &chrono::FixedOffset::east_opt(9 * 3600).unwrap());
+    assert_eq!(s["messages"].as_u64(), Some(local.messages as u64));
+    assert_eq!(s["messages"], 3);
+    assert_eq!(s["actual"], serde_json::to_value(local.actual).unwrap());
+    assert_eq!(s["daily"], serde_json::to_value(&local.daily).unwrap());
+
+    // サーバーにつながらないときは、理由つきの誤りになり、送る対象は残る。
+    let mut f = std::fs::OpenOptions::new().append(true).open(&history).unwrap();
+    writeln!(f, "{}", line("user", "u3", "", 0)).unwrap();
+    claude_stats::refresh_with(&projects, &client_dir, "mac1", now_ms, true).unwrap();
+    let down = shiori_client::Client::new("http://127.0.0.1:1", &e.mac, "app");
+    let err = claude_stats::push_pending(&client_dir, "mac1", 2, |d| {
+        let body = serde_json::to_value(d).unwrap();
+        shiori_client::stats::claude_push(&down, "mac1", &body).map(|_| ()).map_err(shiori_client::stats::explain)
+    })
+    .unwrap_err();
+    assert!(err.contains("つながれません"), "{err}");
+    assert_eq!(run(&c), 1, "つながったあとで、残っていた分が送られる");
+    assert_eq!(shiori_client::stats::claude_summary(&c, "all", None, 540).unwrap()["messages"], 4);
+}
+
 #[allow(dead_code)]
 fn _unused(_: &Path) {}

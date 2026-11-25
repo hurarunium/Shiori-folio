@@ -22,6 +22,16 @@ pub fn claude_summary(c: &Client, range: &str, host: Option<&str>, tz_minutes: i
     c.get(&path)
 }
 
+/// 画面に出す理由の文にする。窓口が無い(404)ときは、サーバーが古いことを伝える。
+pub fn explain(e: ClientError) -> String {
+    match e {
+        ClientError::Status { code: 404, .. } => {
+            "サーバーが利用統計の窓口に対応していません(サーバーを7.0.1以降へ更新してください)".to_string()
+        }
+        other => other.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -56,5 +66,22 @@ mod tests {
         assert_eq!(log[1], r#"PUT /api/v1/stats/claude/%E6%97%A5%E6%9C%AC%20PC {"version":1}"#, "ホスト名は符号化");
         assert_eq!(log[2], "GET /api/v1/stats/claude?range=days30&tz=540 ");
         assert_eq!(log[3], "GET /api/v1/stats/claude?range=all&tz=-300&host=Mac%20Book ");
+    }
+
+    #[test]
+    fn 窓口が無いときはサーバーが古いと伝える() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", server.server_addr().to_ip().unwrap());
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let _ = req.respond(tiny_http::Response::from_string(r#"{"detail":"Not Found"}"#).with_status_code(404));
+            }
+        });
+        let c = Client::new(&url, "t", "app");
+        let e = claude_summary(&c, "all", None, 540).unwrap_err();
+        assert!(explain(e).contains("7.0.1以降"));
+        // 404以外は、いつもの理由のまま。
+        let e = Client::new("http://127.0.0.1:1", "t", "app").get("/x").unwrap_err();
+        assert!(explain(e).contains("つながれません"));
     }
 }
