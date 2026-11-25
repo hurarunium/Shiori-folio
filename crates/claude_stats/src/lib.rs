@@ -12,7 +12,7 @@
 
 use chrono::{DateTime, Local, NaiveDate, TimeZone};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -54,12 +54,12 @@ impl Tokens {
 
 /// 応答1回分。台帳を小さく保つため、JSONでは配列として書く。
 /// (日時[秒], モデル, セッション番号, 実際の量, アプリ式の量)
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 struct ResponseRecord(i64, String, u32, Tokens, Tokens);
 
 /// 発言1つ分。(日時[秒], セッション番号, 履歴に出てきた行数)
 /// 同じ発言は、会話の圧縮や再開のたびに同じファイル・別のファイルへ書き直される。
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 struct MessageRecord(i64, u32, u32);
 
 /// 端末1台分の台帳。`data/claude-stats/<ホスト名>.json`に置く。
@@ -75,6 +75,26 @@ struct Ledger {
     sessions: Vec<String>,
     responses: HashMap<String, ResponseRecord>,
     messages: HashMap<String, MessageRecord>,
+    /// サーバーへ送る準備ができているか(Ver7.0.1)。サーバー接続で初めて取り込むとき、
+    /// これが無ければ、台帳の全記録を`dirty_*`にして(過去の分の引き継ぎ)、trueにする。
+    /// falseに戻すと、全部を再送する。
+    #[serde(default)]
+    sync_initialized: bool,
+    /// サーバーへまだ送っていない(または送ったあとに変わった)応答ID・発言ID。
+    #[serde(default)]
+    dirty_responses: BTreeSet<String>,
+    #[serde(default)]
+    dirty_messages: BTreeSet<String>,
+}
+
+fn read_ledger(path: &Path) -> Result<Option<Ledger>, String> {
+    match fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str::<Ledger>(&text)
+            .map(Some)
+            .map_err(|e| format!("台帳が壊れていて読めません({}): {e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("台帳を読めません({}): {e}", path.display())),
+    }
 }
 
 impl Ledger {
@@ -169,17 +189,30 @@ pub fn refresh(
     host: &str,
     now_ms: u64,
 ) -> Result<RefreshOutcome, String> {
+    refresh_with(projects_dir, ledger_dir, host, now_ms, false)
+}
+
+/// `refresh`と同じ。`for_server`がtrueのときは、サーバーへ送る準備をする(詩織Ver7.0.1)。
+/// 台帳がまだ送る準備をしていなければ、いまある全記録を送る対象にし(過去の分の引き継ぎ)、
+/// 以後、新しく入った・変わった記録を送る対象に足していく。
+pub fn refresh_with(
+    projects_dir: &Path,
+    ledger_dir: &Path,
+    host: &str,
+    now_ms: u64,
+    for_server: bool,
+) -> Result<RefreshOutcome, String> {
     let ledger_path = ledger_dir.join(ledger_file_name(host));
-    let mut ledger = match fs::read_to_string(&ledger_path) {
-        Ok(text) => serde_json::from_str::<Ledger>(&text)
-            .map_err(|e| format!("台帳が壊れていて読めません({}): {e}", ledger_path.display()))?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ledger {
-            version: LEDGER_VERSION,
-            ..Ledger::default()
-        },
-        Err(e) => return Err(format!("台帳を読めません({}): {e}", ledger_path.display())),
-    };
+    let mut ledger = read_ledger(&ledger_path)?.unwrap_or_else(|| Ledger {
+        version: LEDGER_VERSION,
+        ..Ledger::default()
+    });
     ledger.host = host.to_string();
+    if for_server && !ledger.sync_initialized {
+        ledger.dirty_responses = ledger.responses.keys().cloned().collect();
+        ledger.dirty_messages = ledger.messages.keys().cloned().collect();
+        ledger.sync_initialized = true;
+    }
 
     let mut outcome = RefreshOutcome {
         host: host.to_string(),
@@ -283,7 +316,11 @@ fn ingest_line(
     // メッセージ数はアプリのパネルと同じく、サブエージェント分を除いたユーザーと
     // Claudeの発言(ツールの結果を返す行もuserとして含む)を数える。
     let is_message = matches!(line.kind.as_str(), "user" | "assistant") && !line.is_sidechain;
+    let track = ledger.sync_initialized;
     if let (true, Some(uuid)) = (is_message, line.uuid) {
+        if track {
+            ledger.dirty_messages.insert(uuid.clone());
+        }
         match ledger.messages.get_mut(&uuid) {
             Some(record) => record.2 += 1,
             None => {
@@ -305,6 +342,9 @@ fn ingest_line(
         cache_read: usage.cache_read_input_tokens,
         output: usage.output_tokens,
     };
+    if track {
+        ledger.dirty_responses.insert(id.clone());
+    }
     match ledger.responses.get_mut(&id) {
         Some(record) => {
             record.0 = record.0.min(at);
@@ -331,6 +371,155 @@ fn write_ledger(path: &Path, ledger: &Ledger) -> Result<(), String> {
     fs::rename(&tmp, path).map_err(|e| {
         let _ = fs::remove_file(&tmp);
         format!("台帳を置き換えられません: {e}")
+    })
+}
+
+// ---- サーバーへ送る差分(詩織Ver7.0.1) ----
+//
+// 端末は、履歴を読んで台帳を作る(上の`refresh_with`)。サーバーへは、台帳のうち
+// まだ送っていない・変わった記録だけを、差分として送る。サーバーは、IDで上書きして
+// 足す(同じ差分を2回受け取っても結果は同じ)。台帳の全体を送らないのは、台帳が
+// 数MBになり、窓口の本文の上限(4MB)に近いため。
+
+/// 差分の形式の版。
+pub const DELTA_VERSION: u32 = 1;
+/// 差分1回に入れる記録の最大数。1件が約150バイトなので、約1.5MBに収まる。
+pub const MAX_DELTA_RECORDS: usize = 10_000;
+
+/// 応答1回分。(応答ID, 日時[秒], モデル, セッションID, 実際の量, アプリ式の量)
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct DeltaResponse(pub String, pub i64, pub String, pub String, pub Tokens, pub Tokens);
+
+/// 発言1つ分。(発言ID, 日時[秒], セッションID, 履歴に出てきた行数)
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct DeltaMessage(pub String, pub i64, pub String, pub u32);
+
+/// サーバーへ送る差分。
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct Delta {
+    pub version: u32,
+    pub responses: Vec<DeltaResponse>,
+    pub messages: Vec<DeltaMessage>,
+}
+
+impl Delta {
+    pub fn len(&self) -> usize {
+        self.responses.len() + self.messages.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// サーバーが差分を取り込んだ結果。
+#[derive(Serialize, Deserialize, Debug, Default, PartialEq)]
+pub struct ApplyOutcome {
+    pub responses: usize,
+    pub messages: usize,
+}
+
+/// この端末の台帳から、まだ送っていない記録を、最大`max_records`件取り出す。
+/// 送る準備ができていない台帳(`refresh_with`を`for_server`で動かしていない)や、
+/// 台帳が無いときは、空の差分を返す。台帳は変えない。
+pub fn take_delta(ledger_dir: &Path, host: &str, max_records: usize) -> Result<Delta, String> {
+    let path = ledger_dir.join(ledger_file_name(host));
+    let mut delta = Delta {
+        version: DELTA_VERSION,
+        ..Delta::default()
+    };
+    let Some(ledger) = read_ledger(&path)? else {
+        return Ok(delta);
+    };
+    if !ledger.sync_initialized {
+        return Ok(delta);
+    }
+    let session_of = |i: u32| ledger.sessions.get(i as usize).cloned().unwrap_or_default();
+    for id in &ledger.dirty_responses {
+        if delta.len() >= max_records {
+            return Ok(delta);
+        }
+        if let Some(ResponseRecord(at, model, session, actual, app)) = ledger.responses.get(id) {
+            delta
+                .responses
+                .push(DeltaResponse(id.clone(), *at, model.clone(), session_of(*session), *actual, *app));
+        }
+    }
+    for id in &ledger.dirty_messages {
+        if delta.len() >= max_records {
+            return Ok(delta);
+        }
+        if let Some(MessageRecord(at, session, lines)) = ledger.messages.get(id) {
+            delta
+                .messages
+                .push(DeltaMessage(id.clone(), *at, session_of(*session), *lines));
+        }
+    }
+    Ok(delta)
+}
+
+/// 差分をサーバーへ送れたあとに呼び、送った記録を「送る対象」から外す。
+/// 送っている間に記録が変わっていたもの(値が送ったものと違うもの)は、外さずに残す。
+pub fn mark_sent(ledger_dir: &Path, host: &str, delta: &Delta) -> Result<(), String> {
+    let path = ledger_dir.join(ledger_file_name(host));
+    let Some(mut ledger) = read_ledger(&path)? else {
+        return Ok(());
+    };
+    for DeltaResponse(id, at, model, session, actual, app) in &delta.responses {
+        let same = ledger.responses.get(id).is_some_and(|r| {
+            let current_session = ledger.sessions.get(r.2 as usize).map(String::as_str).unwrap_or("");
+            r.0 == *at && r.1 == *model && current_session == session && r.3 == *actual && r.4 == *app
+        });
+        if same {
+            ledger.dirty_responses.remove(id);
+        }
+    }
+    for DeltaMessage(id, at, session, lines) in &delta.messages {
+        let same = ledger.messages.get(id).is_some_and(|m| {
+            let current_session = ledger.sessions.get(m.1 as usize).map(String::as_str).unwrap_or("");
+            m.0 == *at && current_session == session && m.2 == *lines
+        });
+        if same {
+            ledger.dirty_messages.remove(id);
+        }
+    }
+    write_ledger(&path, &ledger)
+}
+
+/// サーバー側。端末から届いた差分を、その端末の台帳へ、IDで上書きして足す。
+/// 台帳が壊れていて読めないときは、何も書かずにエラーを返す。
+pub fn apply_delta(ledger_dir: &Path, host: &str, delta: &Delta, now_ms: u64) -> Result<ApplyOutcome, String> {
+    if delta.version != DELTA_VERSION {
+        return Err(format!("差分の版が合いません(届いた版: {}、扱える版: {DELTA_VERSION})", delta.version));
+    }
+    let path = ledger_dir.join(ledger_file_name(host));
+    let mut ledger = read_ledger(&path)?.unwrap_or_else(|| Ledger {
+        version: LEDGER_VERSION,
+        ..Ledger::default()
+    });
+    ledger.host = host.to_string();
+    let mut lookup: HashMap<String, u32> = ledger
+        .sessions
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.clone(), i as u32))
+        .collect();
+    for DeltaResponse(id, at, model, session, actual, app) in &delta.responses {
+        let s = ledger.session_index(session, &mut lookup);
+        ledger
+            .responses
+            .insert(id.clone(), ResponseRecord(*at, model.clone(), s, *actual, *app));
+    }
+    for DeltaMessage(id, at, session, lines) in &delta.messages {
+        let s = ledger.session_index(session, &mut lookup);
+        ledger.messages.insert(id.clone(), MessageRecord(*at, s, *lines));
+    }
+    ledger.version = LEDGER_VERSION;
+    ledger.updated_at = now_ms;
+    write_ledger(&path, &ledger)?;
+    Ok(ApplyOutcome {
+        responses: delta.responses.len(),
+        messages: delta.messages.len(),
     })
 }
 
@@ -805,5 +994,205 @@ mod tests {
         );
         println!("{:?}", s.models);
         fs::remove_dir_all(&ledgers).unwrap();
+    }
+
+    // ---- サーバーへ送る差分(Ver7.0.1) ----
+
+    /// 端末の台帳の、送っていない記録を、`max`件ずつサーバーの台帳へ送りきる(アプリの送信と同じ流れ)。
+    /// 送った差分の数を返す。
+    fn send_all(client: &Path, server: &Path, host: &str, max: usize) -> Vec<Delta> {
+        let mut sent = Vec::new();
+        loop {
+            let delta = take_delta(client, host, max).unwrap();
+            if delta.is_empty() {
+                return sent;
+            }
+            apply_delta(server, host, &delta, NOW_MS).unwrap();
+            mark_sent(client, host, &delta).unwrap();
+            sent.push(delta);
+        }
+    }
+
+    fn history() -> Vec<String> {
+        let ts = "2026-10-07T01:00:00Z";
+        vec![
+            user("u1", "s1", ts),
+            assistant("a1", "s1", ts, "msg1", "claude-opus-5-5", 5, false),
+            user("u2", "s2", ts),
+            assistant("a2", "s2", ts, "msg2", "claude-sonnet-5-5", 7, false),
+        ]
+    }
+
+    #[test]
+    fn 送る準備をすると既存の全記録が差分になる_過去の引き継ぎ() {
+        let root = temp_dir("sync-init");
+        let (projects, client) = (root.join("projects"), root.join("client"));
+        append(&projects.join("p/s1.jsonl"), &history());
+        // サーバー接続の前に、手元だけで取り込んだ台帳(Ver7.0までの台帳)。
+        refresh(&projects, &client, "pc1", NOW_MS).unwrap();
+        assert!(take_delta(&client, "pc1", 100).unwrap().is_empty(), "準備前は送るものが無い");
+        // サーバー接続で初めて取り込むと、過去の分も含めて、全部が送る対象になる。
+        refresh_with(&projects, &client, "pc1", NOW_MS, true).unwrap();
+        let delta = take_delta(&client, "pc1", 100).unwrap();
+        assert_eq!((delta.responses.len(), delta.messages.len()), (2, 4));
+        assert_eq!(delta.version, DELTA_VERSION);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn 台帳が無いときや準備前は空の差分() {
+        let root = temp_dir("sync-none");
+        assert!(take_delta(&root.join("none"), "pc1", 100).unwrap().is_empty());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn 差分を取り込んだサーバーの集計は端末の台帳の集計と同じ() {
+        let root = temp_dir("sync-same");
+        let (projects, client, server) = (root.join("projects"), root.join("client"), root.join("server"));
+        append(&projects.join("p/s1.jsonl"), &history());
+        refresh_with(&projects, &client, "pc1", NOW_MS, true).unwrap();
+        send_all(&client, &server, "pc1", 100);
+        for range in [StatsRange::All, StatsRange::Days30, StatsRange::Days7] {
+            let a = summary(&client, range, None);
+            let b = summary(&server, range, None);
+            assert_eq!(serde_json::to_string(&a.daily).unwrap(), serde_json::to_string(&b.daily).unwrap());
+            assert_eq!(serde_json::to_string(&a.models).unwrap(), serde_json::to_string(&b.models).unwrap());
+            assert_eq!((a.sessions, a.messages, a.messages_app), (b.sessions, b.messages, b.messages_app));
+            assert_eq!((a.actual, a.app), (b.actual, b.app));
+        }
+        assert!(take_delta(&client, "pc1", 100).unwrap().is_empty(), "送ったあとは送るものが無い");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn 同じ差分を2回取り込んでも結果は同じ() {
+        let root = temp_dir("sync-idem");
+        let (projects, client, server) = (root.join("projects"), root.join("client"), root.join("server"));
+        append(&projects.join("p/s1.jsonl"), &history());
+        refresh_with(&projects, &client, "pc1", NOW_MS, true).unwrap();
+        let delta = take_delta(&client, "pc1", 100).unwrap();
+        apply_delta(&server, "pc1", &delta, NOW_MS).unwrap();
+        // 台帳の並び順(HashMap)は取り込みのたびに変わりうるので、文字列ではなくJSONの値で比べる。
+        let read = || serde_json::from_str::<serde_json::Value>(&fs::read_to_string(server.join("pc1.json")).unwrap()).unwrap();
+        let once = read();
+        apply_delta(&server, "pc1", &delta, NOW_MS).unwrap();
+        assert_eq!(once, read());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn 後から行が増えた応答は最新の値で上書きされ_変わらない記録は送り直さない() {
+        let root = temp_dir("sync-update");
+        let (projects, client, server) = (root.join("projects"), root.join("client"), root.join("server"));
+        let file = projects.join("p/s1.jsonl");
+        append(&file, &history());
+        refresh_with(&projects, &client, "pc1", NOW_MS, true).unwrap();
+        send_all(&client, &server, "pc1", 100);
+        // 応答msg1の行が増え(出力が大きい値になり)、新しい発言も入る。
+        let ts = "2026-10-07T01:00:00Z";
+        append(
+            &file,
+            &[assistant("a1b", "s1", ts, "msg1", "claude-opus-5-5", 90, false), user("u3", "s1", ts)],
+        );
+        refresh_with(&projects, &client, "pc1", NOW_MS, true).unwrap();
+        let sent = send_all(&client, &server, "pc1", 100);
+        assert_eq!(sent.len(), 1);
+        let ids: Vec<&str> = sent[0].responses.iter().map(|r| r.0.as_str()).collect();
+        assert_eq!(ids, vec!["msg1"], "変わった応答だけを送る");
+        let mids: Vec<&str> = sent[0].messages.iter().map(|m| m.0.as_str()).collect();
+        assert_eq!(mids, vec!["a1b", "u3"], "新しい発言だけを送る(変わらない発言は送らない)");
+        assert_eq!(summary(&server, StatsRange::All, None).actual.output, 90 + 7);
+        assert_eq!(
+            serde_json::to_string(&summary(&client, StatsRange::All, None).daily).unwrap(),
+            serde_json::to_string(&summary(&server, StatsRange::All, None).daily).unwrap()
+        );
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn 送っている間に変わった記録は送った扱いにしない() {
+        let root = temp_dir("sync-race");
+        let (projects, client, server) = (root.join("projects"), root.join("client"), root.join("server"));
+        let file = projects.join("p/s1.jsonl");
+        append(&file, &history());
+        refresh_with(&projects, &client, "pc1", NOW_MS, true).unwrap();
+        let delta = take_delta(&client, "pc1", 100).unwrap();
+        // 差分を作ったあと、送り終える前に、同じ応答の行が増える。
+        let ts = "2026-10-07T01:00:00Z";
+        append(&file, &[assistant("a1b", "s1", ts, "msg1", "claude-opus-5-5", 90, false)]);
+        refresh_with(&projects, &client, "pc1", NOW_MS, true).unwrap();
+        apply_delta(&server, "pc1", &delta, NOW_MS).unwrap();
+        mark_sent(&client, "pc1", &delta).unwrap();
+        let rest = take_delta(&client, "pc1", 100).unwrap();
+        let ids: Vec<&str> = rest.responses.iter().map(|r| r.0.as_str()).collect();
+        assert_eq!(ids, vec!["msg1"], "変わったmsg1は残る");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn 差分は指定の件数に分けて送り_全部そろえば同じ集計になる() {
+        let root = temp_dir("sync-chunk");
+        let (projects, client, server) = (root.join("projects"), root.join("client"), root.join("server"));
+        append(&projects.join("p/s1.jsonl"), &history());
+        refresh_with(&projects, &client, "pc1", NOW_MS, true).unwrap();
+        let sent = send_all(&client, &server, "pc1", 2);
+        assert_eq!(sent.len(), 3, "6件(応答2+発言4)を2件ずつ");
+        assert!(sent.iter().all(|d| d.len() <= 2));
+        let (a, b) = (summary(&client, StatsRange::All, None), summary(&server, StatsRange::All, None));
+        assert_eq!((a.sessions, a.messages, a.messages_app, a.actual), (b.sessions, b.messages, b.messages_app, b.actual));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn 送信に失敗したら送る対象が残り_次回に送り直せる() {
+        let root = temp_dir("sync-retry");
+        let (projects, client, server) = (root.join("projects"), root.join("client"), root.join("server"));
+        append(&projects.join("p/s1.jsonl"), &history());
+        refresh_with(&projects, &client, "pc1", NOW_MS, true).unwrap();
+        // 送ろうとして失敗した(mark_sentを呼ばない)。
+        let _ = take_delta(&client, "pc1", 100).unwrap();
+        assert_eq!(take_delta(&client, "pc1", 100).unwrap().len(), 6);
+        send_all(&client, &server, "pc1", 100);
+        assert_eq!(summary(&server, StatsRange::All, None).messages, 4);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn 全端末の台帳をサーバーで合算し_端末をまたぐ重複は1回だけ数える() {
+        let root = temp_dir("sync-hosts");
+        let (server, c1, c2) = (root.join("server"), root.join("c1"), root.join("c2"));
+        let (p1, p2) = (root.join("p1"), root.join("p2"));
+        append(&p1.join("p/s1.jsonl"), &history());
+        // 2台目には、同じ会話の写し(同じID)と、自分だけの発言がある。
+        let mut second = history();
+        second.push(user("u9", "s9", "2026-10-07T02:00:00Z"));
+        append(&p2.join("p/s1.jsonl"), &second);
+        refresh_with(&p1, &c1, "pc1", NOW_MS, true).unwrap();
+        refresh_with(&p2, &c2, "pc2", NOW_MS, true).unwrap();
+        send_all(&c1, &server, "pc1", 100);
+        send_all(&c2, &server, "pc2", 100);
+        let s = summary(&server, StatsRange::All, None);
+        assert_eq!(s.hosts.len(), 2);
+        assert_eq!(s.messages, 5);
+        assert_eq!(s.actual.output, 5 + 7);
+        assert_eq!(summary(&server, StatsRange::All, Some("pc2")).messages, 5);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn 壊れた台帳は上書きせず_版が違う差分は断る() {
+        let root = temp_dir("sync-bad");
+        let (projects, client, server) = (root.join("projects"), root.join("client"), root.join("server"));
+        append(&projects.join("p/s1.jsonl"), &history());
+        refresh_with(&projects, &client, "pc1", NOW_MS, true).unwrap();
+        let delta = take_delta(&client, "pc1", 100).unwrap();
+        fs::create_dir_all(&server).unwrap();
+        fs::write(server.join("pc1.json"), "壊れている").unwrap();
+        assert!(apply_delta(&server, "pc1", &delta, NOW_MS).unwrap_err().contains("壊れて"));
+        assert_eq!(fs::read_to_string(server.join("pc1.json")).unwrap(), "壊れている", "書き換えない");
+        let old = Delta { version: DELTA_VERSION + 1, ..Delta::default() };
+        assert!(apply_delta(&root.join("other"), "pc1", &old, NOW_MS).unwrap_err().contains("版"));
+        fs::remove_dir_all(&root).unwrap();
     }
 }
