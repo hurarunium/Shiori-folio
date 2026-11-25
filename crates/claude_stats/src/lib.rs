@@ -1,4 +1,4 @@
-//! Claudeの利用統計(詩織Ver3.9)。各PCのClaude Codeの履歴(`~/.claude/projects/**/*.jsonl`)
+//! Claudeの利用統計(詩織Ver3.9。Ver7.0.1でTauri非依存のクレートに切り出した)。各PCのClaude Codeの履歴(`~/.claude/projects/**/*.jsonl`)
 //! を差分で読み、応答単位の台帳を端末(ホスト名)別にSSDの`data/claude-stats/`へ貯め、
 //! 全端末の台帳を合算して返す。
 //!

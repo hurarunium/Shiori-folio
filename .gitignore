@@ -38,6 +38,7 @@ data/*.lock
 
 # Rustビルド成果物（OS依存・容量大、Git管理外。docs/setup-third-party.mdの手順で再現）
 src-tauri/target/
+crates/*/target/
 
 # Python仮想環境・キャッシュ（OS依存、Git管理外）
 services/**/.venv/

@@ -7,7 +7,6 @@ mod self_test;
 mod notify;
 mod pet;
 mod sidebar_layout;
-mod claude_stats;
 mod claude_status;
 mod db;
 pub mod eject;

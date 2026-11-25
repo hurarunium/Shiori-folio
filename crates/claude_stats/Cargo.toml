@@ -1,0 +1,10 @@
+[package]
+name = "claude_stats"
+version = "0.1.0"
+edition = "2021"
+description = "Claudeの利用統計の台帳(取り込み・集計)の部品。Tauriに依存しない。アプリとサーバーが共有する"
+
+[dependencies]
+chrono = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

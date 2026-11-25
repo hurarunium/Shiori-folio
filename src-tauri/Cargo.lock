@@ -581,6 +581,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "claude_stats"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "claxon"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3824,6 +3833,7 @@ version = "7.0.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "claude_stats",
  "core-foundation",
  "core-graphics",
  "cpal",
