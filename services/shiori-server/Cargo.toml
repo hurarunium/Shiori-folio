@@ -1,6 +1,6 @@
 [package]
 name = "shiori-server"
-version = "0.1.0"
+version = "7.0.1"
 edition = "2021"
 description = "詩織Ver7.0のサーバー(正本の置き場・窓口・書き込みの一元化・検索の中継・世代のバックアップ)。Tauriに依存しない"
 
