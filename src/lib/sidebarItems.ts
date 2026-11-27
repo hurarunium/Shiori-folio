@@ -37,7 +37,8 @@ const BUILTIN: { id: BuiltinView; label: string; group: SidebarGroup }[] = [
   { id: "library-browse", label: "全件閲覧", group: "screen" },
   { id: "shelf", label: "知識の棚", group: "screen" },
   { id: "rules", label: "規約・記憶", group: "screen" },
-  { id: "claude", label: "Claude", group: "screen" },
+  // idは保存した並びや独自のアイコンが指すので"claude"のまま。
+  { id: "claude", label: "AI", group: "screen" },
   { id: "extensions", label: "拡張機能", group: "bottom" },
   { id: "settings", label: "設定", group: "bottom" },
 ];

@@ -9,7 +9,7 @@ import "./Notices.css";
 
 // 知らせの札(詩織Ver6.0の段階3)。上の帯の下、画面の右上に、新しいものを上に積む。
 // 押すと、その知らせの元へ移る(タイマーと拡張機能は小道具の枠、Claudeは作業が終わったセッションのアプリ、
-// 要確認は一覧)。Claudeのアプリを前に出せなかったとき(別のPCのセッションなど)は「Claude」の画面へ。
+// 要確認は一覧)。Claudeのアプリを前に出せなかったとき(別のPCのセッションなど)はAIの画面のClaudeへ。
 
 const KIND_LABEL: Record<NoticeKind, string> = {
   timer: "タイマー",
@@ -20,7 +20,7 @@ const KIND_LABEL: Record<NoticeKind, string> = {
 
 export function openSource(n: Notice) {
   const view = useMainViewStore.getState();
-  if (n.kind === "claude") view.setActive("claude");
+  if (n.kind === "claude") view.openClaude();
   else if (n.kind === "pending") usePendingStore.getState().setOpen(true);
   else if (n.source) view.showTool(n.source);
 }

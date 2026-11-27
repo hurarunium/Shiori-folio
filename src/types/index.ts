@@ -477,6 +477,48 @@ export interface ClaudeStats {
   warnings: string[];
 }
 
+// Codexの利用統計(詩織Ver7.0.2)。合計は入力+出力(キャッシュ入力と推論出力は内数)。
+export interface CodexTokens {
+  input: number;
+  cachedInput: number;
+  cacheWrite: number;
+  output: number;
+  reasoningOutput: number;
+}
+
+export interface CodexLimitWindow {
+  usedPercent: number;
+  windowMinutes: number | null;
+  // 秒。
+  resetsAt: number | null;
+}
+
+export interface CodexLimit {
+  limitId: string;
+  // 観測した時刻(秒)。
+  observedAt: number;
+  planType: string | null;
+  primary: CodexLimitWindow | null;
+  secondary: CodexLimitWindow | null;
+}
+
+export interface CodexStats {
+  hosts: { host: string; updatedAt: number }[];
+  since: string;
+  until: string;
+  sessions: number;
+  messages: number;
+  activeDays: number;
+  tokens: CodexTokens;
+  totalTokens: number;
+  daily: { date: string; total: number }[];
+  models: { model: string; total: number }[];
+  // レート制限とコンテキスト窓は、期間と端末で絞り込まない最新の値。
+  limits: CodexLimit[];
+  contextWindows: { model: string; observedAt: number; tokens: number }[];
+  warnings: string[];
+}
+
 // 取り外し機能。止める予定のもの(toStop)。
 export interface EjectEntry {
   pid: number;

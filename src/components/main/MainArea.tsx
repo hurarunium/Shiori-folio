@@ -3,7 +3,7 @@ import { useMainViewStore, type MainView } from "../../store/useMainViewStore";
 import { usePendingStore } from "../../store/usePendingStore";
 import { useSidebarItems } from "../../store/useSidebarStore";
 import { getSelfTestMode } from "../../lib/selfTest";
-import ClaudeMonitorPanel from "../panels/ClaudeMonitorPanel";
+import AiPanel from "../panels/AiPanel";
 import LibraryScreen from "../library/LibraryScreen";
 import LibraryBrowseScreen from "../library/LibraryBrowseScreen";
 import ControlPanel from "../controlpanel/ControlPanel";
@@ -27,7 +27,7 @@ const BUILTIN_CONTENT: Partial<Record<MainView, { content: () => ReactNode; self
   "library-browse": { content: () => <LibraryBrowseScreen />, selfScroll: true },
   shelf: { content: () => <ShelfScreen />, selfScroll: true },
   rules: { content: () => <RulesScreen />, selfScroll: true },
-  claude: { content: () => <ClaudeMonitorPanel />, selfScroll: false },
+  claude: { content: () => <AiPanel />, selfScroll: false },
   extensions: { content: () => <ExtensionsScreen />, selfScroll: false },
   settings: { content: () => <ControlPanel />, selfScroll: true },
 };

@@ -17,9 +17,16 @@ export type BuiltinView =
 // 選んでいる画面。画面の拡張機能は "ext:{名前}"。永続化はせず、起動のたびにホームから始める。
 export type MainView = BuiltinView | `ext:${string}`;
 
+// AIの画面(idは"claude"のまま)の中のサブタブ(詩織Ver7.0.2)。
+export type AiTab = "claude" | "codex";
+
 interface MainViewStore {
   active: MainView;
   setActive: (view: MainView) => void;
+  aiTab: AiTab;
+  setAiTab: (tab: AiTab) => void;
+  // Claude向けのリンクから開くとき。前にCodexを見ていても、Claudeのサブタブで開く。
+  openClaude: () => void;
   // 小道具の枠で開いている拡張機能の名前(開ける枠は1つ)
   openTool: string | null;
   // 同じ小道具をもう一度押すと閉じ、別の小道具を押すと入れ替わる
@@ -49,6 +56,15 @@ export const useMainViewStore = create<MainViewStore>((set, get) => ({
   setActive: (view) => {
     logMove(get().active, view);
     set({ active: view });
+  },
+  aiTab: "claude",
+  setAiTab: (tab) => {
+    if (get().aiTab !== tab) api.logUiEvent("AIのサブタブを移った", { to: tab }).catch(() => undefined);
+    set({ aiTab: tab });
+  },
+  openClaude: () => {
+    logMove(get().active, "claude");
+    set({ active: "claude", aiTab: "claude" });
   },
   openTool: null,
   toggleTool: (name) => {

@@ -5,6 +5,7 @@ import type {
   ClaudeSession,
   ClaudeStats,
   ClaudeStatsRange,
+  CodexStats,
   DiagnoseReport,
   AppMode,
   Handoff,
@@ -168,6 +169,9 @@ export const api = {
   // hostがnullなら全端末の合算。
   getClaudeStats: (range: ClaudeStatsRange, host: string | null) =>
     invoke<ClaudeStats>("get_claude_stats", { range, host }),
+  refreshCodexStats: (force: boolean) => invoke<unknown>("refresh_codex_stats", { force }),
+  getCodexStats: (range: ClaudeStatsRange, host: string | null) =>
+    invoke<CodexStats>("get_codex_stats", { range, host }),
 
   ejectPreview: () => invoke<EjectPreview>("eject_preview"),
   ejectExecute: () => invoke<EjectOutcome>("eject_execute"),

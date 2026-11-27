@@ -1,0 +1,48 @@
+/* AIの画面のサブタブ(Claude・Codex)。中の「稼働状況/利用統計」のタブと見分けられるよう、下線の形にする。 */
+.ai-panel__tabs {
+  display: flex;
+  gap: 14px;
+  margin-bottom: 10px;
+  border-bottom: 0.5px solid var(--glass-border);
+}
+
+.ai-panel__tab {
+  font-family: var(--font-body);
+  font-size: var(--fs-base);
+  padding: 2px 4px 6px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--paper-dim);
+  cursor: pointer;
+}
+
+.ai-panel__tab:hover {
+  color: var(--paper);
+}
+
+.ai-panel__tab--active {
+  border-bottom-color: var(--moss);
+  color: var(--paper);
+}
+
+/* Codexのレート制限とコンテキスト窓 */
+.codex-stats__limit {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.codex-stats__row {
+  display: grid;
+  grid-template-columns: minmax(0, 9em) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-sm);
+}
+
+.codex-stats__note {
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--paper-dim);
+}

@@ -1,72 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../../api/tauri";
 import type { ClaudeStats, ClaudeStatsCounting, ClaudeStatsRange, ClaudeTokens } from "../../types";
+import { buildHeatmap, formatDateTime, formatTokens, heatLevel } from "./statsFormat";
 
 const RANGE_LABEL: Record<ClaudeStatsRange, string> = { all: "すべて", days30: "30日", days7: "7日" };
 const COUNTING_LABEL: Record<ClaudeStatsCounting, string> = { actual: "実際", app: "アプリ式" };
-// 「すべて」でもヒートマップは直近1年分までにする(ウィンドウの幅に収めるため)。
-const MAX_HEATMAP_WEEKS = 53;
-
-function formatTokens(n: number): string {
-  if (n >= 1e9) return `${(n / 1e9).toFixed(1)}B`;
-  if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
-  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
-  return String(n);
-}
 
 function totalOf(t: ClaudeTokens): number {
   return t.input + t.cacheCreation + t.cacheRead + t.output;
-}
-
-function parseLocalDate(ymd: string): Date {
-  const [y, m, d] = ymd.split("-").map(Number);
-  return new Date(y, m - 1, d);
-}
-
-function toYmd(date: Date): string {
-  const m = String(date.getMonth() + 1).padStart(2, "0");
-  const d = String(date.getDate()).padStart(2, "0");
-  return `${date.getFullYear()}-${m}-${d}`;
-}
-
-function formatDateTime(ms: number): string {
-  const t = new Date(ms);
-  return `${t.getMonth() + 1}/${t.getDate()} ${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")}`;
-}
-
-interface HeatCell {
-  date: string;
-  value: number;
-  inRange: boolean;
-}
-
-// 期間の初日を含む週の日曜日から、今日を含む週の土曜日までを、週ごとの列に並べる。
-function buildHeatmap(stats: ClaudeStats, counting: ClaudeStatsCounting): HeatCell[][] {
-  const values = new Map(stats.daily.map((d) => [d.date, d[counting]]));
-  const until = parseLocalDate(stats.until);
-  const start = parseLocalDate(stats.since);
-  start.setDate(start.getDate() - start.getDay());
-  const earliest = new Date(until);
-  earliest.setDate(earliest.getDate() - earliest.getDay() - (MAX_HEATMAP_WEEKS - 1) * 7);
-  if (start < earliest) start.setTime(earliest.getTime());
-
-  const weeks: HeatCell[][] = [];
-  for (const day = new Date(start); day <= until || day.getDay() !== 0; day.setDate(day.getDate() + 1)) {
-    if (day.getDay() === 0) weeks.push([]);
-    const date = toYmd(day);
-    weeks[weeks.length - 1].push({
-      date,
-      value: values.get(date) ?? 0,
-      inRange: date >= stats.since && date <= stats.until,
-    });
-  }
-  return weeks;
-}
-
-// 最大値に対する割合で4段階に分ける。0は記録なし。
-function heatLevel(value: number, max: number): number {
-  if (value <= 0 || max <= 0) return 0;
-  return Math.min(4, Math.ceil((value / max) * 4));
 }
 
 // Claudeモニターの「利用統計」タブ(詩織Ver3.9)。各端末のClaude Codeの履歴から
@@ -117,7 +58,10 @@ function ClaudeStatsView({ active }: { active: boolean }) {
     };
   }, [active, range, host, refreshCount]);
 
-  const heatmap = useMemo(() => (stats ? buildHeatmap(stats, counting) : []), [stats, counting]);
+  const heatmap = useMemo(
+    () => (stats ? buildHeatmap(stats.since, stats.until, new Map(stats.daily.map((d) => [d.date, d[counting]]))) : []),
+    [stats, counting],
+  );
   const maxDaily = useMemo(
     () => Math.max(0, ...heatmap.flat().filter((c) => c.inRange).map((c) => c.value)),
     [heatmap],

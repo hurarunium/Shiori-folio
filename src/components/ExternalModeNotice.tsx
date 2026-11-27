@@ -21,7 +21,7 @@ function ExternalModeNotice() {
       {!startingConversation && (
         <p className="external-mode-notice__body">
           会話用のAIを止めて、Claudeなど外部のAIと使うためのモードです。詩織との会話と音声入力は使えませんが、
-          図書館・全件閲覧・Claudeモニターと、Claudeからの検索(MCP)はそのまま使えます。
+          図書館・全件閲覧・AIの画面(稼働状況・利用統計)と、Claudeからの検索(MCP)はそのまま使えます。
         </p>
       )}
       {startingConversation && (

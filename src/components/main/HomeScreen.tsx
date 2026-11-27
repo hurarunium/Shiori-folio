@@ -71,6 +71,7 @@ function HomeScreen({ pending, onOpenPending }: Props) {
   const active = useMainViewStore((s) => s.active === "home");
   const searchInLibrary = useMainViewStore((s) => s.searchInLibrary);
   const setActiveView = useMainViewStore((s) => s.setActive);
+  const openClaude = useMainViewStore((s) => s.openClaude);
   const openTask = useMainViewStore((s) => s.openTask);
   const serviceStatuses = useShioriStore((s) => s.serviceStatuses);
 
@@ -304,7 +305,7 @@ function HomeScreen({ pending, onOpenPending }: Props) {
         >
           要確認 {pendingTotal ?? "…"}件
         </button>
-        <button type="button" className="home-screen__status-item" onClick={() => setActiveView("claude")}>
+        <button type="button" className="home-screen__status-item" onClick={openClaude}>
           Claude {claudeSessions ?? "…"}セッション稼働中
         </button>
         <span className="home-screen__status-item">
