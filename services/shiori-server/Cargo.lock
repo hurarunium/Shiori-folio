@@ -116,6 +116,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex_stats"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "constant_time_eq"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -762,6 +771,7 @@ version = "7.0.1"
 dependencies = [
  "chrono",
  "claude_stats",
+ "codex_stats",
  "fs4",
  "getrandom 0.2.17",
  "library_store",

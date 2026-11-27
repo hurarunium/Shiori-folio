@@ -1,17 +1,19 @@
-//! 利用統計の窓口(詩織Ver7.0.1)。端末が取り込んだ台帳の差分を受け取り、全端末の合算を返す。
-//! 台帳の取り込み・集計の中身は `claude_stats`(アプリと同じ部品)。
+//! 利用統計の窓口(詩織Ver7.0.1のClaude、Ver7.0.2のCodex)。端末が取り込んだ台帳の差分を受け取り、全端末の合算を返す。
+//! 台帳の取り込み・集計の中身は `claude_stats`・`codex_stats`(アプリと同じ部品)。
 //!
 //! - `PUT /api/v1/stats/claude/{ホスト名}`  本文は差分 `{version, responses, messages}` → `{responses, messages}`(取り込んだ件数)
 //! - `GET /api/v1/stats/claude?range=all|days30|days7[&host=..][&tz=分]` → `ClaudeStats`
+//! - `PUT /api/v1/stats/codex/{ホスト名}`  本文は `codex_stats::Delta` → `{responses, messages}`
+//! - `GET /api/v1/stats/codex?(Claudeと同じ引数)` → `CodexStats`
 //!
-//! 台帳は `data/claude-stats/<ホスト名>.json`。履歴の中身(プロンプト・応答)は受け取らない
-//! (差分に入るのは、ID・日時・モデル・トークン数・sessionIdだけ)。
+//! 台帳は `data/claude-stats/<ホスト名>.json` と `data/codex-stats/<ホスト名>.json`。履歴の中身
+//! (プロンプト・応答)は受け取らない。どちらも世代のバックアップには入れない(端末の台帳が写し)。
 
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use chrono::FixedOffset;
-use claude_stats::{Delta, StatsRange, DELTA_VERSION};
+use chrono::{DateTime, FixedOffset};
+use serde::de::DeserializeOwned;
 use serde_json::json;
 use tiny_http::Method;
 
@@ -21,6 +23,7 @@ use crate::api::{err, percent_decode, query_param, App, Reply};
 static LOCK: Mutex<()> = Mutex::new(());
 
 const CLAUDE_PATH: &str = "/api/v1/stats/claude";
+const CODEX_PATH: &str = "/api/v1/stats/codex";
 /// ホスト名の長さの上限(文字数)。
 const MAX_HOST_CHARS: usize = 128;
 
@@ -28,49 +31,109 @@ pub fn ledger_dir(app: &App) -> PathBuf {
     app.cfg.data.join("claude-stats")
 }
 
+pub fn codex_ledger_dir(app: &App) -> PathBuf {
+    app.cfg.data.join("codex-stats")
+}
+
 pub fn route(app: &App, method: &Method, path: &str, url: &str, body: &str) -> Reply {
-    if path == CLAUDE_PATH && *method == Method::Get {
-        return summary(app, url);
+    if *method == Method::Get {
+        match path {
+            CLAUDE_PATH => return claude_summary(app, url),
+            CODEX_PATH => return codex_summary(app, url),
+            _ => {}
+        }
     }
-    if let Some(host) = path.strip_prefix(&format!("{CLAUDE_PATH}/")) {
-        if *method == Method::Put {
-            return push(app, host, body);
+    if *method == Method::Put {
+        if let Some(host) = path.strip_prefix(&format!("{CLAUDE_PATH}/")) {
+            return claude_push(app, host, body);
+        }
+        if let Some(host) = path.strip_prefix(&format!("{CODEX_PATH}/")) {
+            return codex_push(app, host, body);
         }
     }
     err(404, "Not Found")
 }
 
-fn push(app: &App, host: &str, body: &str) -> Reply {
+/// 差分の受け取りの、ClaudeとCodexに共通する検査。ホスト名と、本文の形を確かめる。
+fn parse_push<D: DeserializeOwned>(host: &str, body: &str) -> Result<(String, D), Reply> {
     let Some(host) = percent_decode(host) else {
-        return err(422, "ホスト名が正しくない");
+        return Err(err(422, "ホスト名が正しくない"));
     };
     if host.is_empty() || host.chars().count() > MAX_HOST_CHARS || host.chars().any(char::is_control) {
-        return err(422, "ホスト名が正しくない(空・長すぎる・制御文字)");
+        return Err(err(422, "ホスト名が正しくない(空・長すぎる・制御文字)"));
     }
-    let delta: Delta = match serde_json::from_str(body) {
-        Ok(d) => d,
-        Err(e) => return err(422, &format!("本文の形が正しくない: {e}")),
-    };
-    if delta.version != DELTA_VERSION {
-        return err(
-            422,
-            &format!("差分の版が合いません(届いた版: {}、扱える版: {DELTA_VERSION})", delta.version),
-        );
+    match serde_json::from_str(body) {
+        Ok(d) => Ok((host, d)),
+        Err(e) => Err(err(422, &format!("本文の形が正しくない: {e}"))),
     }
-    let now_ms = (app.clock)().timestamp_millis().max(0) as u64;
-    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    match claude_stats::apply_delta(&ledger_dir(app), &host, &delta, now_ms) {
-        Ok(o) => (200, json!({"responses": o.responses, "messages": o.messages})),
+}
+
+fn check_version(got: u32, supported: u32) -> Result<(), Reply> {
+    if got == supported {
+        return Ok(());
+    }
+    Err(err(422, &format!("差分の版が合いません(届いた版: {got}、扱える版: {supported})")))
+}
+
+fn now_ms(now: &DateTime<FixedOffset>) -> u64 {
+    now.timestamp_millis().max(0) as u64
+}
+
+/// 取り込んだ件数、または失敗の理由を応答にする。
+fn applied(result: Result<(usize, usize), String>) -> Reply {
+    match result {
+        Ok((responses, messages)) => (200, json!({"responses": responses, "messages": messages})),
         Err(m) => err(500, &m),
     }
 }
 
-fn summary(app: &App, url: &str) -> Reply {
+fn claude_push(app: &App, host: &str, body: &str) -> Reply {
+    let (host, delta): (String, claude_stats::Delta) = match parse_push(host, body) {
+        Ok(v) => v,
+        Err(reply) => return reply,
+    };
+    if let Err(reply) = check_version(delta.version, claude_stats::DELTA_VERSION) {
+        return reply;
+    }
+    let now = now_ms(&(app.clock)());
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    applied(claude_stats::apply_delta(&ledger_dir(app), &host, &delta, now).map(|o| (o.responses, o.messages)))
+}
+
+fn codex_push(app: &App, host: &str, body: &str) -> Reply {
+    let (host, delta): (String, codex_stats::Delta) = match parse_push(host, body) {
+        Ok(v) => v,
+        Err(reply) => return reply,
+    };
+    if let Err(reply) = check_version(delta.version, codex_stats::DELTA_VERSION) {
+        return reply;
+    }
+    let now = now_ms(&(app.clock)());
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    applied(codex_stats::apply_delta(&codex_ledger_dir(app), &host, &delta, now).map(|o| (o.responses, o.messages)))
+}
+
+/// 集計の引数。期間の名前、端末の絞り込み、日付の区切りに使う時差。
+struct SummaryQuery {
+    range: Range,
+    host: Option<String>,
+    offset: FixedOffset,
+    now_ms: u64,
+}
+
+#[derive(Clone, Copy)]
+enum Range {
+    All,
+    Days30,
+    Days7,
+}
+
+fn summary_query(app: &App, url: &str) -> Result<SummaryQuery, Reply> {
     let range = match query_param(url, "range").as_deref() {
-        None | Some("all") => StatsRange::All,
-        Some("days30") => StatsRange::Days30,
-        Some("days7") => StatsRange::Days7,
-        Some(other) => return err(422, &format!("range が正しくない: {other}(all・days30・days7)")),
+        None | Some("all") => Range::All,
+        Some("days30") => Range::Days30,
+        Some("days7") => Range::Days7,
+        Some(other) => return Err(err(422, &format!("range が正しくない: {other}(all・days30・days7)"))),
     };
     let now = (app.clock)();
     // 日付の区切りは、見ている端末の時差で決める。無ければ、サーバーの時計の時差。
@@ -83,16 +146,44 @@ fn summary(app: &App, url: &str) -> Reply {
                 .and_then(|minutes| minutes.checked_mul(60))
                 .and_then(FixedOffset::east_opt)
             else {
-                return err(422, "tz が正しくない(UTC からの時差を、分で)");
+                return Err(err(422, "tz が正しくない(UTC からの時差を、分で)"));
             };
             offset
         }
     };
     let host = query_param(url, "host").filter(|h| !h.is_empty());
-    let now_ms = now.timestamp_millis().max(0) as u64;
-    let stats = claude_stats::summarize(&ledger_dir(app), range, host.as_deref(), now_ms, &offset);
+    Ok(SummaryQuery { range, host, offset, now_ms: now_ms(&now) })
+}
+
+fn stats_reply<T: serde::Serialize>(stats: T) -> Reply {
     match serde_json::to_value(stats) {
         Ok(v) => (200, v),
         Err(e) => err(500, &format!("集計を返せません: {e}")),
     }
+}
+
+fn claude_summary(app: &App, url: &str) -> Reply {
+    let q = match summary_query(app, url) {
+        Ok(q) => q,
+        Err(reply) => return reply,
+    };
+    let range = match q.range {
+        Range::All => claude_stats::StatsRange::All,
+        Range::Days30 => claude_stats::StatsRange::Days30,
+        Range::Days7 => claude_stats::StatsRange::Days7,
+    };
+    stats_reply(claude_stats::summarize(&ledger_dir(app), range, q.host.as_deref(), q.now_ms, &q.offset))
+}
+
+fn codex_summary(app: &App, url: &str) -> Reply {
+    let q = match summary_query(app, url) {
+        Ok(q) => q,
+        Err(reply) => return reply,
+    };
+    let range = match q.range {
+        Range::All => codex_stats::StatsRange::All,
+        Range::Days30 => codex_stats::StatsRange::Days30,
+        Range::Days7 => codex_stats::StatsRange::Days7,
+    };
+    stats_reply(codex_stats::summarize(&codex_ledger_dir(app), range, q.host.as_deref(), q.now_ms, &q.offset))
 }

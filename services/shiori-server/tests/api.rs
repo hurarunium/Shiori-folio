@@ -885,7 +885,7 @@ fn 統計の不正な入力は断り_台帳を壊さない() {
     assert_eq!(e.win("GET", "/api/v1/stats/claude?tz=abc", None).0, 422);
     assert_eq!(e.win("GET", "/api/v1/stats/claude?tz=99999999", None).0, 422);
     // 窓口に無い
-    assert_eq!(e.win("GET", "/api/v1/stats/codex", None).0, 404);
+    assert_eq!(e.win("GET", "/api/v1/stats/unknown", None).0, 404);
     assert_eq!(e.win("DELETE", "/api/v1/stats/claude/pc1", None).0, 404);
     // 記録が1件も無くても、集計は空で返る
     let (code, s) = e.win("GET", "/api/v1/stats/claude", None);
@@ -955,6 +955,160 @@ fn 端末の取り込みから送信と合算までの一巡_過去の台帳の�
     assert!(err.contains("つながれません"), "{err}");
     assert_eq!(run(&c), 1, "つながったあとで、残っていた分が送られる");
     assert_eq!(shiori_client::stats::claude_summary(&c, "all", None, 540).unwrap()["messages"], 4);
+}
+
+// ---- Codexの利用統計(Ver7.0.2) ----
+
+fn codex_tokens(output: u64) -> codex_stats::Tokens {
+    codex_stats::Tokens { input: 100, cached_input: 60, cache_write: 0, output, reasoning_output: 1 }
+}
+
+/// 応答1つと発言1つと、レート制限1つを持つ差分。
+fn codex_delta(response: &str, at_secs: i64, output: u64, message: &str, used: f64) -> Value {
+    let d = codex_stats::Delta {
+        version: codex_stats::DELTA_VERSION,
+        responses: vec![codex_stats::DeltaResponse(
+            response.into(), at_secs, "gpt-x".into(), "s1".into(), codex_tokens(output), false,
+        )],
+        messages: vec![codex_stats::DeltaMessage(message.into(), at_secs, "s1".into(), true)],
+        limits: vec![codex_stats::LimitSnapshot {
+            limit_id: "codex".into(),
+            observed_at: at_secs,
+            plan_type: Some("free".into()),
+            primary: Some(codex_stats::LimitWindow { used_percent: used, window_minutes: Some(43200), resets_at: None }),
+            secondary: None,
+        }],
+        context_windows: Vec::new(),
+        unsupported_files: None,
+    };
+    serde_json::to_value(d).unwrap()
+}
+
+#[test]
+fn codexの窓口は認証が要り_不正な入力は台帳を作らずに断る() {
+    let e = Env::new();
+    let t = at("2026-11-22T10:00:00+09:00").timestamp();
+    let d = || codex_delta("r1", t, 5, "m1", 1.0);
+    assert_eq!(e.call("PUT", "/api/v1/stats/codex/pc1", None, Some(d())).0, 401);
+    assert_eq!(e.call("GET", "/api/v1/stats/codex", None, None).0, 401);
+    assert_eq!(e.win("PUT", "/api/v1/stats/codex/", Some(d())).0, 422);
+    assert_eq!(e.win("PUT", "/api/v1/stats/codex/a%0Ab", Some(d())).0, 422);
+    assert_eq!(e.win("PUT", "/api/v1/stats/codex/pc1", Some(json!({"hello": 1}))).0, 422);
+    // Claudeの形の本文は受け付けない。
+    assert_eq!(e.win("PUT", "/api/v1/stats/codex/pc1", Some(delta_of("r1", t, 5, "m1"))).0, 422);
+    let mut old = d();
+    old["version"] = json!(99);
+    assert_eq!(e.win("PUT", "/api/v1/stats/codex/pc1", Some(old)).0, 422);
+    assert!(!e.root.join("data/codex-stats/pc1.json").exists());
+    assert_eq!(e.win("GET", "/api/v1/stats/codex?range=year", None).0, 422);
+    assert_eq!(e.win("GET", "/api/v1/stats/codex?tz=abc", None).0, 422);
+    assert_eq!(e.win("DELETE", "/api/v1/stats/codex/pc1", None).0, 404);
+    let (code, s) = e.win("GET", "/api/v1/stats/codex", None);
+    assert_eq!((code, s["messages"].as_u64(), s["totalTokens"].as_u64()), (200, Some(0), Some(0)));
+}
+
+#[test]
+fn codexは複数の端末を合算し_再送で増えず_claudeの台帳と混ざらない() {
+    let e = Env::new();
+    let t = at("2026-11-22T10:00:00+09:00").timestamp();
+    assert_eq!(e.win("PUT", "/api/v1/stats/codex/pc1", Some(codex_delta("r1", t, 5, "m1", 10.0))).0, 200);
+    assert_eq!(
+        e.call("PUT", "/api/v1/stats/codex/pc2", Some(&e.mac.clone()), Some(codex_delta("r2", t + 60, 7, "m2", 30.0))).0,
+        200
+    );
+    let get = |q: &str| e.win("GET", &format!("/api/v1/stats/codex?tz=540{q}"), None).1;
+    let s = get("");
+    assert_eq!((s["hosts"].as_array().unwrap().len(), s["messages"].as_u64()), (2, Some(2)));
+    assert_eq!(s["totalTokens"], 212);
+    assert_eq!(s["limits"][0]["primary"]["usedPercent"], 30.0, "新しい方の観測");
+
+    assert_eq!(e.win("PUT", "/api/v1/stats/codex/pc1", Some(codex_delta("r1", t, 5, "m1", 10.0))).0, 200);
+    assert_eq!(get(""), s);
+    let only = get("&host=pc1");
+    assert_eq!((only["totalTokens"].as_u64(), only["limits"][0]["primary"]["usedPercent"].as_f64()), (Some(105), Some(30.0)));
+
+    assert!(e.root.join("data/codex-stats/pc1.json").exists());
+    assert!(!e.root.join("data/claude-stats/pc1.json").exists());
+    let (_, claude) = e.win("GET", "/api/v1/stats/claude", None);
+    assert_eq!(claude["messages"], 0);
+}
+
+/// 差分が上限の件数でも、窓口の本文の上限に収まる(IDとモデル名は実物より長めにする)。
+#[test]
+fn codexの上限の件数の差分は本文の上限に収まって受け付けられる() {
+    let e = Env::new();
+    let t = at("2026-11-22T10:00:00+09:00").timestamp();
+    let big = codex_stats::Tokens {
+        input: 99_999_999, cached_input: 99_999_999, cache_write: 99_999_999, output: 99_999_999, reasoning_output: 99_999_999,
+    };
+    let d = codex_stats::Delta {
+        version: codex_stats::DELTA_VERSION,
+        responses: (0..codex_stats::MAX_DELTA_RECORDS)
+            .map(|i| codex_stats::DeltaResponse(
+                format!("resp_{i:0>64}"), t, "m".repeat(40), "01a1e32b-dc74-7b80-a7eb-59b2d03a53a5".into(), big, false,
+            ))
+            .collect(),
+        ..Default::default()
+    };
+    let size = serde_json::to_string(&d).unwrap().len() as u64;
+    assert!(size < shiori_server::api::MAX_BODY, "差分が大きすぎる: {size}バイト");
+    let (code, v) = e.win("PUT", "/api/v1/stats/codex/pc1", Some(serde_json::to_value(d).unwrap()));
+    assert_eq!((code, v["responses"].as_u64()), (200, Some(codex_stats::MAX_DELTA_RECORDS as u64)), "{v}");
+}
+
+/// アプリがやることを、本物の `shiori_client` と本物のサーバーで通す。
+#[test]
+fn codexの取り込みから送信と合算までの一巡() {
+    let e = Env::new();
+    let dir = tempfile::tempdir().unwrap();
+    let (home, client_dir) = (dir.path().join("codex"), dir.path().join("client"));
+    std::fs::create_dir_all(home.join("sessions")).unwrap();
+    let line = |kind: &str, payload: Value| json!({"timestamp": "2026-11-22T01:00:00Z", "type": kind, "payload": payload}).to_string();
+    let usage = |id: &str| line("token_usage_record", json!({"response_id": id, "session_id": "s1", "turn_id": "t1",
+        "usage": {"input_tokens": 100, "cached_input_tokens": 60, "output_tokens": 20, "reasoning_output_tokens": 5}}));
+    let message = |id: &str| line("event_msg", json!({"type": "item_completed", "item": {"type": "UserMessage", "id": id}}));
+    let history = home.join("sessions/a.jsonl");
+    let first = [
+        line("session_meta", json!({"session_id": "s1", "source": "vscode"})),
+        line("turn_context", json!({"turn_id": "t1", "model": "gpt-x"})),
+        message("u1"),
+        usage("r1"),
+    ];
+    std::fs::write(&history, first.join("\n") + "\n").unwrap();
+    let append = |l: String| {
+        use std::io::Write;
+        writeln!(std::fs::OpenOptions::new().append(true).open(&history).unwrap(), "{l}").unwrap();
+    };
+
+    let now_ms = at("2026-11-22T14:30:00+09:00").timestamp_millis() as u64;
+    // サーバー接続の前に、手元だけで取り込んだ分も、あとで送られる。
+    codex_stats::refresh_with(&home, &client_dir, "mac1", now_ms, false).unwrap();
+    let c = shiori_client::Client::new(&e.base, &e.mac, "app");
+    let push = |c: &shiori_client::Client| {
+        codex_stats::refresh_with(&home, &client_dir, "mac1", now_ms, true).unwrap();
+        codex_stats::push_pending(&client_dir, "mac1", 2, |d| {
+            let body = serde_json::to_value(d).unwrap();
+            shiori_client::stats::codex_push(c, "mac1", &body).map(|_| ()).map_err(shiori_client::stats::explain_codex)
+        })
+    };
+    assert_eq!(push(&c).unwrap(), 3, "発言1・応答1・読めない件数1");
+    assert_eq!(push(&c).unwrap(), 0);
+
+    // つながらないときは理由つきの誤りになり、送る対象は残る。
+    append(usage("r2"));
+    let down = shiori_client::Client::new("http://127.0.0.1:1", &e.mac, "app");
+    assert!(push(&down).unwrap_err().contains("つながれません"));
+    assert_eq!(push(&c).unwrap(), 1);
+
+    let s = shiori_client::stats::codex_summary(&c, "all", None, 540).unwrap();
+    let local = codex_stats::summarize(&client_dir, codex_stats::StatsRange::All, None, now_ms, &chrono::FixedOffset::east_opt(9 * 3600).unwrap());
+    let mut local = serde_json::to_value(local).unwrap();
+    // 取り込み(端末)と受け取り(サーバー)の時刻の欄だけは別。
+    let mut s = s;
+    local["hosts"] = json!(null);
+    s["hosts"] = json!(null);
+    assert_eq!(s, local);
+    assert_eq!(s["totalTokens"], 240);
 }
 
 #[allow(dead_code)]
