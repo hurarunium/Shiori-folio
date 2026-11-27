@@ -605,6 +605,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex_stats"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "combine"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3834,6 +3843,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "claude_stats",
+ "codex_stats",
  "core-foundation",
  "core-graphics",
  "cpal",

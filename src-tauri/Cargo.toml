@@ -59,6 +59,8 @@ unicode-normalization = "0.1.26"
 library_store = { path = "../crates/library_store" }
 # Claudeの利用統計の台帳(詩織Ver7.0.1で切り出した。Tauriに依存しない)
 claude_stats = { path = "../crates/claude_stats" }
+# Codexの利用統計の台帳(詩織Ver7.0.2。Tauriに依存しない)
+codex_stats = { path = "../crates/codex_stats" }
 # サーバーに話しかける側(shiori-save・shiori-task・mcp_serverが、server.jsonがあるときに使う)
 shiori_client = { path = "../crates/shiori_client" }
 

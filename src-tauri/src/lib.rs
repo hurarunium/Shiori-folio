@@ -8,6 +8,7 @@ mod notify;
 mod pet;
 mod sidebar_layout;
 mod claude_status;
+mod codex_usage;
 mod db;
 pub mod eject;
 pub mod diagnose;
@@ -5658,6 +5659,12 @@ pub fn run() {
                     log_error!("Claudeの利用統計の取り込みに失敗: {e}");
                 }
             });
+            // Codexも同じ。Claudeの取り込みと分け、片方の失敗がもう片方に影響しないようにする。
+            std::thread::spawn(|| {
+                if let Err(e) = codex_usage::refresh_blocking(true) {
+                    log_error!("Codexの利用統計の取り込みに失敗: {e}");
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -5676,6 +5683,8 @@ pub fn run() {
             log_frontend_error,
             set_app_mode,
             get_claude_stats,
+            codex_usage::refresh_codex_stats,
+            codex_usage::get_codex_stats,
             eject_preview,
             eject_execute,
             set_config,
